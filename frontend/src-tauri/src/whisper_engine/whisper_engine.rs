@@ -918,29 +918,9 @@ impl WhisperEngine {
             *cancel_flag = None;
         }
 
-        // Official ggerganov/whisper.cpp model URLs from Hugging Face
-        let model_url = match model_name {
-            // Standard f16 models
-            "tiny" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-            "base" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            "small" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-            "medium" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-            "large-v3-turbo" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-            "large-v3" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        let model_url = whisper_model_download_url(model_name)
+            .ok_or_else(|| anyhow!("Unsupported model: {}", model_name))?;
 
-            // Q5_1 quantized models
-            "tiny-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin",
-            "base-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
-            "small-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
-
-            // Q5_0 quantized models
-            "medium-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
-            "large-v3-turbo-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-            "large-v3-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
-
-            _ => return Err(anyhow!("Unsupported model: {}", model_name))
-        };
-        
         log::info!("Model URL for {}: {}", model_name, model_url);
         
         // Generate correct filename - all models follow ggml-{model_name}.bin pattern
@@ -1133,5 +1113,89 @@ impl WhisperEngine {
         }
 
         Ok(())
+    }
+}
+
+/// Resolve the Hugging Face download URL for a catalog model name.
+///
+/// Kept as a pure function (no I/O) so a missing/typo'd entry is caught by
+/// [`tests::every_catalog_model_has_a_download_url`] instead of surfacing as
+/// an "Unsupported model" error at download time.
+///
+/// Official ggerganov/whisper.cpp model URLs from Hugging Face, except
+/// distil-large-v3 which is hosted in a separate distil-whisper repo.
+fn whisper_model_download_url(model_name: &str) -> Option<&'static str> {
+    Some(match model_name {
+        // Standard f16 models (multilingual)
+        "tiny" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        "base" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        "small" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        "medium" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        "large-v3-turbo" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        "large-v3" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        "large-v2" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v2.bin",
+
+        // English-only f16 models
+        "tiny.en" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+        "base.en" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        "small.en" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        "medium.en" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+
+        // Q5_1 quantized models
+        "tiny-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin",
+        "base-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
+        "small-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+        "tiny.en-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
+        "base.en-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+        "small.en-q5_1" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin",
+
+        // Q5_0 quantized models
+        "medium-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+        "large-v3-turbo-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+        "large-v3-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+        "medium.en-q5_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin",
+
+        // Q8_0 quantized models (near-lossless)
+        "small-q8_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q8_0.bin",
+        "medium-q8_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q8_0.bin",
+        "large-v3-turbo-q8_0" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
+
+        // Distilled models (distil-whisper org, English-only)
+        "distil-large-v3" => "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_catalog_model_has_a_download_url() {
+        for &(name, ..) in WHISPER_MODEL_CATALOG {
+            assert!(
+                whisper_model_download_url(name).is_some(),
+                "catalog model '{}' has no entry in whisper_model_download_url()",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn download_urls_end_with_the_expected_filename() {
+        for &(name, filename, ..) in WHISPER_MODEL_CATALOG {
+            let url = whisper_model_download_url(name).unwrap();
+            assert!(
+                url.ends_with(filename),
+                "model '{}': url '{}' does not end with expected filename '{}'",
+                name, url, filename
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_model_returns_none() {
+        assert!(whisper_model_download_url("not-a-real-model").is_none());
     }
 }

@@ -48,87 +48,6 @@ export interface TranscribeAudioRequest {
   sampleRate: number;
 }
 
-// Model configuration for different use cases
-export const MODEL_CONFIGS: Record<string, Partial<ModelInfo>> = {
-  // Standard f16 models (full precision)
-  'large-v3': {
-    description: 'Highest accuracy, best for important meetings. Slower processing.',
-    size_mb: 2951,
-    accuracy: 'High',
-    speed: 'Slow'
-  },
-  'large-v3-turbo': {
-    description: 'Best accuracy with improved speed.',
-    size_mb: 1549,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'medium': {
-    description: 'Balanced accuracy and speed. Good for most use cases.',
-    size_mb: 1463,
-    accuracy: 'High',
-    speed: 'Slow'
-  },
-  'small': {
-    description: 'Fast processing with good quality. Great for quick transcription.',
-    size_mb: 466,
-    accuracy: 'Good',
-    speed: 'Medium'
-  },
-  'base': {
-    description: 'Good balance of speed and accuracy.',
-    size_mb: 142,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-  'tiny': {
-    description: 'Fastest processing, good for real-time use.',
-    size_mb: 39,
-    accuracy: 'Decent',
-    speed: 'Very Fast'
-  },
-
-  // Q5_1 quantized models (balanced speed/accuracy, slightly better quality than Q5_0)
-  'tiny-q5_1': {
-    description: 'Quantized tiny model, ~50% faster processing.',
-    size_mb: 31,
-    accuracy: 'Decent',
-    speed: 'Very Fast'
-  },
-  'base-q5_1': {
-    description: 'Quantized base model, good speed/accuracy balance.',
-    size_mb: 57,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-  'small-q5_1': {
-    description: 'Quantized small model, faster than f16 version.',
-    size_mb: 181,
-    accuracy: 'Good',
-    speed: 'Fast'
-  },
-
-  // Q5_0 quantized models (balanced speed/accuracy)
-  'medium-q5_0': {
-    description: 'Quantized medium model, professional quality with better speed.',
-    size_mb: 514,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'large-v3-turbo-q5_0': {
-    description: 'Quantized large turbo model, best balance.',
-    size_mb: 547,
-    accuracy: 'High',
-    speed: 'Medium'
-  },
-  'large-v3-q5_0': {
-    description: 'Quantized large model, best balance of speed and accuracy.',
-    size_mb: 1031,
-    accuracy: 'High',
-    speed: 'Slow'
-  }
-};
-
 // Helper functions
 export function getModelIcon(accuracy: ModelAccuracy): string {
   switch (accuracy) {
@@ -154,8 +73,9 @@ export function formatFileSize(sizeMb: number): string {
   return `${sizeMb}MB`;
 }
 
-// Helper function to get model type (f16, q5_1, q5_0, q4_0)
-export function getModelType(modelName: string): 'f16' | 'q5_1' | 'q5_0' | 'q4_0' {
+// Helper function to get model type (f16, q8_0, q5_1, q5_0, q4_0)
+export function getModelType(modelName: string): 'f16' | 'q8_0' | 'q5_1' | 'q5_0' | 'q4_0' {
+  if (modelName.includes('-q8_0')) return 'q8_0';
   if (modelName.includes('-q5_1')) return 'q5_1';
   if (modelName.includes('-q5_0')) return 'q5_0';
   if (modelName.includes('-q4_0')) return 'q4_0';
@@ -164,7 +84,7 @@ export function getModelType(modelName: string): 'f16' | 'q5_1' | 'q5_0' | 'q4_0
 
 // Helper function to get model base name (without quantization suffix)
 export function getModelBaseName(modelName: string): string {
-  return modelName.replace(/-q[45]_[01]$/, '');
+  return modelName.replace(/-q[458]_[01]$/, '');
 }
 
 // Helper function to check if model is quantized
@@ -178,6 +98,8 @@ export function getModelPerformanceBadge(modelName: string): { label: string; co
   switch (type) {
     case 'f16':
       return { label: 'Full Precision', color: 'blue' };
+    case 'q8_0':
+      return { label: 'Near-Lossless', color: 'green' };
     case 'q5_1':
       return { label: 'Balanced+', color: 'green' };
     case 'q5_0':
@@ -217,20 +139,31 @@ export function getModelTagline(modelName: string, speed: ProcessingSpeed, accur
     featureText = 'Most accurate';
   } else if (baseName === 'large-v3-turbo') {
     featureText = 'Best accuracy with speed';
-  } else if (baseName === 'medium') {
+  } else if (baseName === 'large-v2') {
+    featureText = 'Previous-gen large model';
+  } else if (baseName === 'medium' || baseName === 'medium.en') {
     featureText = accuracy === 'High' ? 'Professional quality' : 'Balanced quality';
-  } else if (baseName === 'small') {
+  } else if (baseName === 'small' || baseName === 'small.en') {
     featureText = 'Good accuracy';
-  } else if (baseName === 'base') {
+  } else if (baseName === 'base' || baseName === 'base.en') {
     featureText = 'Balanced quality';
-  } else if (baseName === 'tiny') {
+  } else if (baseName === 'tiny' || baseName === 'tiny.en') {
     featureText = 'Fastest option';
+  } else if (baseName === 'distil-large-v3') {
+    featureText = 'Distilled for speed';
+  }
+
+  // English-only models are smaller/faster than their multilingual counterpart
+  if (baseName.endsWith('.en') || baseName === 'distil-large-v3') {
+    featureText += featureText ? ', English-only' : 'English-only';
   }
 
   // Add quantization note if applicable
   if (isQuantized) {
     const quantType = getModelType(modelName);
-    if (quantType === 'q5_0') {
+    if (quantType === 'q8_0') {
+      featureText += ', near-lossless';
+    } else if (quantType === 'q5_0') {
       featureText += ', optimized';
     } else if (quantType === 'q4_0') {
       featureText += ', ultra fast';
@@ -252,12 +185,12 @@ export function groupModelsByBase(models: ModelInfo[]): Record<string, ModelInfo
     grouped[baseName].push(model);
   });
 
-  // Sort each group: f16 first, then q5_1, then q5_0, then q4_0
+  // Sort each group: f16 first, then q8_0, then q5_1, then q5_0, then q4_0
   Object.keys(grouped).forEach(baseName => {
     grouped[baseName].sort((a, b) => {
       const aType = getModelType(a.name);
       const bType = getModelType(b.name);
-      const order = { 'f16': 0, 'q5_1': 1, 'q5_0': 2, 'q4_0': 3 };
+      const order = { 'f16': 0, 'q8_0': 1, 'q5_1': 2, 'q5_0': 3, 'q4_0': 4 };
       return order[aType] - order[bType];
     });
   });
