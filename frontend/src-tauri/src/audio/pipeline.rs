@@ -613,6 +613,7 @@ impl AudioCapture {
             timestamp,
             chunk_id,
             device_type: self.device_type.clone(),
+            dominant_speaker: None,
         };
 
         // NOTE: Raw audio is NOT sent to recording saver to prevent echo
@@ -694,6 +695,37 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    // SPEAKER TAGGING: per-window mic/system energy log, keyed on the same
+    // cumulative-ms clock as the VAD's segment timestamps (both driven by
+    // the same sequential stream of mixed windows), so a completed VAD
+    // segment's time range can be matched back to which channel dominated.
+    window_log: VecDeque<WindowEnergy>,
+    window_log_cumulative_ms: f64,
+}
+
+/// Per-window (pre-mix) energy snapshot used to attribute a VAD speech
+/// segment to the microphone or system audio channel.
+#[derive(Debug, Clone, Copy)]
+struct WindowEnergy {
+    start_ms: f64,
+    end_ms: f64,
+    mic_rms: f32,
+    sys_rms: f32,
+}
+
+/// How long a dominant channel's energy must exceed the other's to call it
+/// (rather than "ambiguous", e.g. cross-talk or comparable levels).
+const SPEAKER_DOMINANCE_RATIO: f64 = 1.5;
+
+/// How much window-energy history to retain, bounding memory for pathologically
+/// long uninterrupted speech segments (VAD only breaks on a redemption pause).
+const WINDOW_LOG_RETENTION_MS: f64 = 10.0 * 60.0 * 1000.0; // 10 minutes
+
+fn calculate_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 impl AudioPipeline {
@@ -760,6 +792,57 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None,  // Will be set by manager
+            window_log: VecDeque::new(),
+            window_log_cumulative_ms: 0.0,
+        }
+    }
+
+    /// Record one pre-mix window's mic/system energy and prune old history.
+    fn log_window_energy(&mut self, mic_window: &[f32], sys_window: &[f32]) {
+        let duration_ms = mic_window.len() as f64 / self.sample_rate as f64 * 1000.0;
+        let start_ms = self.window_log_cumulative_ms;
+        let end_ms = start_ms + duration_ms;
+
+        self.window_log.push_back(WindowEnergy {
+            start_ms,
+            end_ms,
+            mic_rms: calculate_rms(mic_window),
+            sys_rms: calculate_rms(sys_window),
+        });
+        self.window_log_cumulative_ms = end_ms;
+
+        while let Some(oldest) = self.window_log.front() {
+            if oldest.end_ms < end_ms - WINDOW_LOG_RETENTION_MS {
+                self.window_log.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Attribute a VAD speech segment's time range to "mic", "system", or
+    /// `None` (comparable energy on both sides — ambiguous/cross-talk).
+    fn dominant_speaker_for_range(&self, start_ms: f64, end_ms: f64) -> Option<String> {
+        let mut mic_energy = 0.0f64;
+        let mut sys_energy = 0.0f64;
+
+        for window in &self.window_log {
+            let overlap_ms = window.end_ms.min(end_ms) - window.start_ms.max(start_ms);
+            if overlap_ms <= 0.0 {
+                continue;
+            }
+            mic_energy += window.mic_rms as f64 * overlap_ms;
+            sys_energy += window.sys_rms as f64 * overlap_ms;
+        }
+
+        if mic_energy <= 0.0 && sys_energy <= 0.0 {
+            None
+        } else if mic_energy > sys_energy * SPEAKER_DOMINANCE_RATIO {
+            Some("mic".to_string())
+        } else if sys_energy > mic_energy * SPEAKER_DOMINANCE_RATIO {
+            Some("system".to_string())
+        } else {
+            None
         }
     }
 
@@ -822,6 +905,10 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
+                            // SPEAKER TAGGING: log pre-mix per-channel energy for this window,
+                            // used below to attribute completed VAD segments to mic vs. system.
+                            self.log_window_energy(&mic_window, &sys_window);
+
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -841,12 +928,18 @@ impl AudioPipeline {
                                             info!("📤 Sending VAD segment: {:.1}ms, {} samples",
                                                   duration_ms, segment.samples.len());
 
+                                            let dominant_speaker = self.dominant_speaker_for_range(
+                                                segment.start_timestamp_ms,
+                                                segment.end_timestamp_ms,
+                                            );
+
                                             let transcription_chunk = AudioChunk {
                                                 data: segment.samples,
                                                 sample_rate: 16000,
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
                                                 chunk_id: self.chunk_id_counter,
                                                 device_type: DeviceType::Microphone,  // Mixed audio
+                                                dominant_speaker,
                                             };
 
                                             if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -873,6 +966,7 @@ impl AudioPipeline {
                                     timestamp: chunk.timestamp,
                                     chunk_id: self.chunk_id_counter,
                                     device_type: DeviceType::Microphone,  // Mixed audio
+                                    dominant_speaker: None,
                                 };
                                 let _ = sender.send(recording_chunk);
                             }
@@ -911,12 +1005,18 @@ impl AudioPipeline {
                         info!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
                               duration_ms, segment.samples.len());
 
+                        let dominant_speaker = self.dominant_speaker_for_range(
+                            segment.start_timestamp_ms,
+                            segment.end_timestamp_ms,
+                        );
+
                         let transcription_chunk = AudioChunk {
                             data: segment.samples,
                             sample_rate: 16000,
                             timestamp: segment.start_timestamp_ms / 1000.0,
                             chunk_id: self.chunk_id_counter,
                             device_type: DeviceType::Microphone,
+                            dominant_speaker,
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -1039,6 +1139,7 @@ impl AudioPipelineManager {
                 timestamp: 0.0,
                 chunk_id: u64::MAX, // Special ID to indicate flush
                 device_type: super::recording_state::DeviceType::Microphone,
+                dominant_speaker: None,
             };
 
             if let Err(e) = sender.send(flush_chunk) {
@@ -1059,6 +1160,7 @@ impl AudioPipelineManager {
                         timestamp: 0.0,
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
+                        dominant_speaker: None,
                     };
                     let _ = sender.send(additional_flush);
                 }

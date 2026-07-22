@@ -22,6 +22,10 @@ pub struct AudioChunk {
     pub timestamp: f64,
     pub chunk_id: u64,
     pub device_type: DeviceType,
+    /// For VAD speech segments sent to transcription: which channel's energy
+    /// dominated this segment's time range — `"mic"`, `"system"`, or `None`
+    /// when comparable (cross-talk, or not computed for this chunk).
+    pub dominant_speaker: Option<String>,
 }
 
 /// Processed audio chunk (post-VAD) for recording
