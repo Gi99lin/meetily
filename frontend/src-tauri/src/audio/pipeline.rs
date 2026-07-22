@@ -728,6 +728,37 @@ fn calculate_rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
+/// Pure implementation behind `AudioPipeline::dominant_speaker_for_range`,
+/// extracted as a free function so it's testable without constructing a
+/// full pipeline (which needs live channels/device state).
+fn dominant_speaker_for_range_in(
+    window_log: &VecDeque<WindowEnergy>,
+    start_ms: f64,
+    end_ms: f64,
+) -> Option<String> {
+    let mut mic_energy = 0.0f64;
+    let mut sys_energy = 0.0f64;
+
+    for window in window_log {
+        let overlap_ms = window.end_ms.min(end_ms) - window.start_ms.max(start_ms);
+        if overlap_ms <= 0.0 {
+            continue;
+        }
+        mic_energy += window.mic_rms as f64 * overlap_ms;
+        sys_energy += window.sys_rms as f64 * overlap_ms;
+    }
+
+    if mic_energy <= 0.0 && sys_energy <= 0.0 {
+        None
+    } else if mic_energy > sys_energy * SPEAKER_DOMINANCE_RATIO {
+        Some("mic".to_string())
+    } else if sys_energy > mic_energy * SPEAKER_DOMINANCE_RATIO {
+        Some("system".to_string())
+    } else {
+        None
+    }
+}
+
 impl AudioPipeline {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
@@ -823,27 +854,7 @@ impl AudioPipeline {
     /// Attribute a VAD speech segment's time range to "mic", "system", or
     /// `None` (comparable energy on both sides — ambiguous/cross-talk).
     fn dominant_speaker_for_range(&self, start_ms: f64, end_ms: f64) -> Option<String> {
-        let mut mic_energy = 0.0f64;
-        let mut sys_energy = 0.0f64;
-
-        for window in &self.window_log {
-            let overlap_ms = window.end_ms.min(end_ms) - window.start_ms.max(start_ms);
-            if overlap_ms <= 0.0 {
-                continue;
-            }
-            mic_energy += window.mic_rms as f64 * overlap_ms;
-            sys_energy += window.sys_rms as f64 * overlap_ms;
-        }
-
-        if mic_energy <= 0.0 && sys_energy <= 0.0 {
-            None
-        } else if mic_energy > sys_energy * SPEAKER_DOMINANCE_RATIO {
-            Some("mic".to_string())
-        } else if sys_energy > mic_energy * SPEAKER_DOMINANCE_RATIO {
-            Some("system".to_string())
-        } else {
-            None
-        }
+        dominant_speaker_for_range_in(&self.window_log, start_ms, end_ms)
     }
 
     /// Run the VAD-driven audio processing pipeline
@@ -1178,5 +1189,89 @@ impl AudioPipelineManager {
 impl Default for AudioPipelineManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod speaker_tagging_tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_rms_silence() {
+        assert_eq!(calculate_rms(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_calculate_rms_empty() {
+        assert_eq!(calculate_rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn test_calculate_rms_constant_signal() {
+        // RMS of a constant-amplitude signal equals that amplitude
+        let rms = calculate_rms(&[0.5, -0.5, 0.5, -0.5]);
+        assert!((rms - 0.5).abs() < 1e-6, "got {}", rms);
+    }
+
+    fn window(start_ms: f64, end_ms: f64, mic_rms: f32, sys_rms: f32) -> WindowEnergy {
+        WindowEnergy { start_ms, end_ms, mic_rms, sys_rms }
+    }
+
+    #[test]
+    fn test_dominant_speaker_mic_wins() {
+        let log: VecDeque<WindowEnergy> = VecDeque::from([
+            window(0.0, 600.0, 0.9, 0.1),
+            window(600.0, 1200.0, 0.8, 0.05),
+        ]);
+        assert_eq!(
+            dominant_speaker_for_range_in(&log, 0.0, 1200.0),
+            Some("mic".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dominant_speaker_system_wins() {
+        let log: VecDeque<WindowEnergy> = VecDeque::from([
+            window(0.0, 600.0, 0.05, 0.9),
+            window(600.0, 1200.0, 0.02, 0.85),
+        ]);
+        assert_eq!(
+            dominant_speaker_for_range_in(&log, 0.0, 1200.0),
+            Some("system".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dominant_speaker_ambiguous_when_comparable() {
+        // Energies close enough (< SPEAKER_DOMINANCE_RATIO apart) => None, not a guess
+        let log: VecDeque<WindowEnergy> = VecDeque::from([window(0.0, 600.0, 0.5, 0.45)]);
+        assert_eq!(dominant_speaker_for_range_in(&log, 0.0, 600.0), None);
+    }
+
+    #[test]
+    fn test_dominant_speaker_no_overlap_is_none() {
+        let log: VecDeque<WindowEnergy> = VecDeque::from([window(0.0, 600.0, 0.9, 0.1)]);
+        // Range entirely after the only logged window — no overlap at all.
+        assert_eq!(dominant_speaker_for_range_in(&log, 1000.0, 1600.0), None);
+    }
+
+    #[test]
+    fn test_dominant_speaker_empty_log_is_none() {
+        let log: VecDeque<WindowEnergy> = VecDeque::new();
+        assert_eq!(dominant_speaker_for_range_in(&log, 0.0, 1000.0), None);
+    }
+
+    #[test]
+    fn test_dominant_speaker_partial_overlap_weighs_by_duration() {
+        // A VAD segment [300, 900] overlaps window A [0,600] by 300ms and
+        // window B [600,1200] by 300ms — equal weight from each.
+        let log: VecDeque<WindowEnergy> = VecDeque::from([
+            window(0.0, 600.0, 1.0, 0.0),   // pure mic
+            window(600.0, 1200.0, 1.0, 0.0), // pure mic
+        ]);
+        assert_eq!(
+            dominant_speaker_for_range_in(&log, 300.0, 900.0),
+            Some("mic".to_string())
+        );
     }
 }

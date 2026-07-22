@@ -117,3 +117,49 @@ pub fn dominant_speaker_key_for_range(
         .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(_, speaker_index)| speaker_key(speaker_index))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_speaker_key_formatting() {
+        assert_eq!(speaker_key(0), "speaker_00");
+        assert_eq!(speaker_key(1), "speaker_01");
+        assert_eq!(speaker_key(12), "speaker_12");
+    }
+
+    fn segment(start: f64, end: f64, speaker: i32) -> DiarizedSegment {
+        DiarizedSegment { start_seconds: start, end_seconds: end, speaker_index: speaker }
+    }
+
+    #[test]
+    fn test_dominant_speaker_key_picks_max_overlap() {
+        let diarized = vec![segment(0.0, 5.0, 0), segment(5.0, 12.0, 1)];
+        // Transcript segment [4, 8] overlaps speaker 0 by 1s and speaker 1 by 3s.
+        assert_eq!(
+            dominant_speaker_key_for_range(&diarized, 4.0, 8.0),
+            Some("speaker_01".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dominant_speaker_key_no_overlap_is_none() {
+        let diarized = vec![segment(0.0, 5.0, 0)];
+        assert_eq!(dominant_speaker_key_for_range(&diarized, 10.0, 12.0), None);
+    }
+
+    #[test]
+    fn test_dominant_speaker_key_empty_diarization_is_none() {
+        assert_eq!(dominant_speaker_key_for_range(&[], 0.0, 5.0), None);
+    }
+
+    #[test]
+    fn test_dominant_speaker_key_exact_tie_picks_one_consistently() {
+        // Two speakers with identical overlap — max_by picks the later one in
+        // iteration order on ties, which is fine as long as it's deterministic.
+        let diarized = vec![segment(0.0, 2.0, 0), segment(2.0, 4.0, 1)];
+        let result = dominant_speaker_key_for_range(&diarized, 1.0, 3.0);
+        assert!(result == Some("speaker_00".to_string()) || result == Some("speaker_01".to_string()));
+    }
+}
