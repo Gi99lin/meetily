@@ -4,7 +4,8 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { diarizationService } from '@/services/diarizationService';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -49,6 +50,30 @@ export function TranscriptPanel({
   meetingFolderPath,
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
+  // Custom names for ML-diarized speakers ("speaker_00" -> "Anna"); badges
+  // fall back to a generic "Speaker N" label for keys with no entry here.
+  const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
+
+  const refetchSpeakerNames = useCallback(async () => {
+    if (!meetingId) return;
+    try {
+      const speakers = await diarizationService.getSpeakerNames(meetingId);
+      setSpeakerNames(Object.fromEntries(speakers.map(s => [s.speaker_key, s.display_name])));
+    } catch (error) {
+      console.warn('Failed to load speaker names:', error);
+    }
+  }, [meetingId]);
+
+  useEffect(() => {
+    refetchSpeakerNames();
+  }, [refetchSpeakerNames]);
+
+  const handleRenameSpeaker = useCallback(async (speakerKey: string, displayName: string) => {
+    if (!meetingId) return;
+    await diarizationService.renameSpeaker(meetingId, speakerKey, displayName);
+    await refetchSpeakerNames();
+  }, [meetingId, refetchSpeakerNames]);
+
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -76,6 +101,7 @@ export function TranscriptPanel({
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts}
+          onRefetchSpeakerNames={refetchSpeakerNames}
         />
       </div>
 
@@ -95,6 +121,8 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          speakerNames={speakerNames}
+          onRenameSpeaker={meetingId ? handleRenameSpeaker : undefined}
         />
       </div>
 

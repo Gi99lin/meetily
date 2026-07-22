@@ -3,10 +3,13 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Users, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
+import { diarizationService } from '@/services/diarizationService';
+import { areDiarizationModelsReady } from '@/types/diarization';
 
 
 interface TranscriptButtonGroupProps {
@@ -16,6 +19,7 @@ interface TranscriptButtonGroupProps {
   meetingId?: string;
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
+  onRefetchSpeakerNames?: () => Promise<void>;
 }
 
 
@@ -26,9 +30,11 @@ export function TranscriptButtonGroup({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
+  onRefetchSpeakerNames,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [isDiarizing, setIsDiarizing] = useState(false);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
@@ -36,6 +42,33 @@ export function TranscriptButtonGroup({
       await onRefetchTranscripts();
     }
   }, [onRefetchTranscripts]);
+
+  const handleDetectSpeakers = useCallback(async () => {
+    if (!meetingId || isDiarizing) return;
+
+    setIsDiarizing(true);
+    try {
+      const status = await diarizationService.getModelsStatus();
+      if (!areDiarizationModelsReady(status)) {
+        toast.info('Downloading speaker detection models (one-time, ~55MB)...');
+        await diarizationService.downloadModels();
+      }
+
+      const result = await diarizationService.runDiarization(meetingId);
+      toast.success(
+        `Found ${result.num_speakers} speaker(s), labeled ${result.segments_updated} segment(s).`
+      );
+
+      await onRefetchTranscripts?.();
+      await onRefetchSpeakerNames?.();
+    } catch (error) {
+      toast.error('Speaker detection failed', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsDiarizing(false);
+    }
+  }, [meetingId, isDiarizing, onRefetchTranscripts, onRefetchSpeakerNames]);
 
   return (
     <div className="flex items-center justify-center w-full gap-2">
@@ -81,6 +114,27 @@ export function TranscriptButtonGroup({
           >
             <RefreshCw className="xl:mr-2" size={18} />
             <span className="hidden lg:inline">Enhance</span>
+          </Button>
+        )}
+
+        {betaFeatures.speakerDiarization && meetingId && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="xl:px-4"
+            onClick={() => {
+              Analytics.trackButtonClick('detect_speakers', 'meeting_details');
+              handleDetectSpeakers();
+            }}
+            disabled={isDiarizing || transcriptCount === 0}
+            title="Detect distinct speakers in this recording"
+          >
+            {isDiarizing ? (
+              <Loader2 className="xl:mr-2 animate-spin" size={18} />
+            ) : (
+              <Users className="xl:mr-2" size={18} />
+            )}
+            <span className="hidden lg:inline">{isDiarizing ? 'Detecting...' : 'Speakers'}</span>
           </Button>
         )}
       </ButtonGroup>

@@ -6,6 +6,9 @@ import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { Input } from "./ui/input";
+import { Button } from "./ui/button";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
@@ -34,6 +37,11 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    /** Custom display names for ML-diarized speaker keys ("speaker_00" -> "Anna") */
+    speakerNames?: Record<string, string>;
+    /** When provided, diarized speaker badges become clickable to rename. Omit to disable renaming (e.g. live recording). */
+    onRenameSpeaker?: (speakerKey: string, displayName: string) => Promise<void>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -63,21 +71,99 @@ function cleanStopWords(text: string): string {
     return cleanedText.replace(/\s+/g, ' ').trim();
 }
 
-// Small "You" / "Others" label for the dominant audio channel of a segment.
-// Omitted entirely when speaker is unknown/ambiguous (cross-talk) rather than
-// showing a placeholder.
-function SpeakerBadge({ speaker }: { speaker?: string }) {
-    if (speaker !== 'mic' && speaker !== 'system') return null;
+// Parses a diarization key like "speaker_00" into a 1-indexed display number.
+// Returns null for anything that isn't that exact format (e.g. "mic"/"system").
+function parseSpeakerIndex(speaker: string): number | null {
+    const match = /^speaker_(\d+)$/.exec(speaker);
+    return match ? parseInt(match[1], 10) + 1 : null;
+}
 
-    const isMic = speaker === 'mic';
-    return (
-        <span
-            className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0 ${
-                isMic ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'
-            }`}
-        >
-            {isMic ? 'You' : 'Others'}
+// Small speaker label next to each transcript line. Three cases:
+// - "mic"/"system" (live-recording channel heuristic): fixed "You"/"Others", never renamable.
+// - "speaker_NN" (ML diarization cluster): custom name if set, else generic "Speaker N";
+//   clickable to rename when `onRename` is provided.
+// - anything else/undefined (ambiguous, or not yet processed): no badge at all.
+function SpeakerBadge({
+    speaker,
+    speakerNames,
+    onRename,
+}: {
+    speaker?: string;
+    speakerNames?: Record<string, string>;
+    onRename?: (speakerKey: string, displayName: string) => Promise<void>;
+}) {
+    const [isOpen, setIsOpen] = useState(false);
+    const [draftName, setDraftName] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+
+    if (speaker === 'mic' || speaker === 'system') {
+        const isMic = speaker === 'mic';
+        return (
+            <span
+                className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0 ${
+                    isMic ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'
+                }`}
+            >
+                {isMic ? 'You' : 'Others'}
+            </span>
+        );
+    }
+
+    if (!speaker) return null;
+    const speakerNumber = parseSpeakerIndex(speaker);
+    if (speakerNumber === null) return null; // Unrecognized format — say nothing rather than guess.
+
+    const label = speakerNames?.[speaker] || `Speaker ${speakerNumber}`;
+
+    const badge = (
+        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0 bg-purple-50 text-purple-600 hover:bg-purple-100 cursor-pointer">
+            {label}
         </span>
+    );
+
+    if (!onRename) return badge;
+
+    const handleSave = async () => {
+        const trimmed = draftName.trim();
+        if (!trimmed || isSaving) return;
+        setIsSaving(true);
+        try {
+            await onRename(speaker, trimmed);
+            setIsOpen(false);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    return (
+        <Popover
+            open={isOpen}
+            onOpenChange={(open) => {
+                setIsOpen(open);
+                if (open) setDraftName(speakerNames?.[speaker] || '');
+            }}
+        >
+            <PopoverTrigger asChild>{badge}</PopoverTrigger>
+            <PopoverContent className="w-64" side="top">
+                <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">Rename {label}</p>
+                    <div className="flex gap-2">
+                        <Input
+                            value={draftName}
+                            onChange={(e) => setDraftName(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSave();
+                            }}
+                            placeholder="e.g. Anna"
+                            autoFocus
+                        />
+                        <Button size="sm" onClick={handleSave} disabled={isSaving || !draftName.trim()}>
+                            Save
+                        </Button>
+                    </div>
+                </div>
+            </PopoverContent>
+        </Popover>
     );
 }
 
@@ -88,6 +174,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text,
     confidence,
     speaker,
+    speakerNames,
+    onRenameSpeaker,
     isStreaming,
     showConfidence,
 }: {
@@ -96,6 +184,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text: string;
     confidence?: number;
     speaker?: string;
+    speakerNames?: Record<string, string>;
+    onRenameSpeaker?: (speakerKey: string, displayName: string) => Promise<void>;
     isStreaming: boolean;
     showConfidence: boolean;
 }) {
@@ -116,7 +206,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         )}
                     </TooltipContent>
                 </Tooltip>
-                <SpeakerBadge speaker={speaker} />
+                <SpeakerBadge speaker={speaker} speakerNames={speakerNames} onRename={onRenameSpeaker} />
                 <div className="flex-1">
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
@@ -145,6 +235,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    speakerNames,
+    onRenameSpeaker,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -316,6 +408,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        speakerNames={speakerNames}
+                                        onRenameSpeaker={onRenameSpeaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />
@@ -373,6 +467,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        speakerNames={speakerNames}
+                                        onRenameSpeaker={onRenameSpeaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />

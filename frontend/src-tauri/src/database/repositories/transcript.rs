@@ -1,4 +1,5 @@
 use crate::api::{TranscriptSearchResult, TranscriptSegment};
+use crate::database::models::Transcript;
 use chrono::Utc;
 use sqlx::{Connection, Error as SqlxError, SqlitePool};
 use tracing::{error, info};
@@ -7,6 +8,35 @@ use uuid::Uuid;
 pub struct TranscriptsRepository;
 
 impl TranscriptsRepository {
+    /// Fetch every transcript row for a meeting, ordered by playback time.
+    /// Used by offline speaker diarization, which needs the full set of
+    /// segments (not a page of them) to reconcile against.
+    pub async fn get_all_for_meeting(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Vec<Transcript>, SqlxError> {
+        sqlx::query_as::<_, Transcript>(
+            "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
+        )
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Overwrite the `speaker` label for a single transcript row.
+    pub async fn update_speaker(
+        pool: &SqlitePool,
+        transcript_id: &str,
+        speaker: Option<&str>,
+    ) -> Result<(), SqlxError> {
+        sqlx::query("UPDATE transcripts SET speaker = ? WHERE id = ?")
+            .bind(speaker)
+            .bind(transcript_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     /// Saves a new meeting and its associated transcript segments.
     /// This function uses a transaction to ensure that either both the meeting
     /// and all its transcripts are saved, or none of them are.

@@ -52,6 +52,14 @@ hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
+# Offline speaker diarization (opt-in, off by default).
+# Adds the official sherpa-onnx crate, which vendors its own onnxruntime
+# build separate from the `ort` crate already used for Parakeet — this
+# increases binary size and build time, and has not been build-verified
+# in this repo yet. Enable explicitly once verified on a target platform:
+#   cargo build --release --features diarization
+diarization = ["dep:sherpa-onnx", "dep:bzip2-rs", "dep:tar"]
+
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
@@ -105,6 +113,11 @@ silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", 
 # Parakeet (ONNX-based fast transcription) dependencies
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
 thiserror = "2.0.16"                # Error handling for Parakeet
+
+# Offline speaker diarization (feature = "diarization", opt-in, see [features] above)
+sherpa-onnx = { version = "1.13", optional = true }   # Official k2-fsa Rust bindings (pyannote segmentation + speaker embedding + clustering)
+bzip2-rs = { version = "0.1", optional = true }        # Pure-Rust decompressor for the segmentation model's .tar.bz2 archive
+tar = { version = "0.4", optional = true }             # Archive extraction (already a build-dependency; needed at runtime too)
 
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }

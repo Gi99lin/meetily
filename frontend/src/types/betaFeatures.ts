@@ -22,10 +22,18 @@ export interface BetaFeatures {
    * @since v0.3.0
    */
   importAndRetranscribe: boolean;
+  /**
+   * ML-based offline speaker diarization ("Speaker 1", "Speaker 2", ...) for
+   * a meeting's recording. Requires the app to be built with the Cargo
+   * `diarization` feature — off by default, so this UI is off by default too.
+   * @since v0.4.0
+   */
+  speakerDiarization: boolean;
 }
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
   importAndRetranscribe: true, // Default: enabled
+  speakerDiarization: false, // Default: disabled — matching the Cargo feature's off-by-default build
 };
 
 
@@ -34,6 +42,7 @@ export const DEFAULT_BETA_FEATURES: BetaFeatures = {
  */
 export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import Audio/Video & Retranscribe',
+  speakerDiarization: 'Speaker Diarization',
 };
 
 /**
@@ -41,6 +50,7 @@ export const BETA_FEATURE_NAMES: Record<keyof BetaFeatures, string> = {
  */
 export const BETA_FEATURE_DESCRIPTIONS: Record<keyof BetaFeatures, string> = {
   importAndRetranscribe: 'Import audio or video files to transcribe, or retranscribe existing meetings with different language settings.',
+  speakerDiarization: 'Detect and label distinct speakers in a recording using on-device ML. Requires a build with speaker diarization enabled.',
 };
 
 /**
