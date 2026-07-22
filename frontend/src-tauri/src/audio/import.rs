@@ -1,7 +1,7 @@
-// Audio file import module - allows importing external audio files as new meetings
+// Audio/video file import module - allows importing external audio or video files as new meetings
 
 use crate::api::TranscriptSegment;
-use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
+use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress, probe_duration_seconds};
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
@@ -160,7 +160,11 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
         .unwrap_or("Imported Audio")
         .to_string();
 
-    // Try fast metadata-only validation first
+    // Try fast metadata-only validation first (Symphonia container probe).
+    // Formats Symphonia can't demux (MKV, WebM, WMA, and video containers)
+    // fall through to a fast ffmpeg header probe, and only resort to a full
+    // decode as a last resort — important for video files, which can be much
+    // larger than a typical audio recording.
     let duration_seconds = match extract_duration_from_metadata(path) {
         Ok(duration) => {
             debug!(
@@ -170,13 +174,24 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
             duration
         }
         Err(e) => {
-            // Fallback to full decode if metadata unavailable
-            warn!(
-                "Metadata extraction failed: {}, falling back to full decode",
+            debug!(
+                "Metadata extraction failed: {}, trying ffmpeg duration probe",
                 e
             );
-            let decoded = decode_audio_file(path)?;
-            decoded.duration_seconds
+            match probe_duration_seconds(path) {
+                Ok(duration) => {
+                    debug!("Got duration from ffmpeg probe: {:.2}s (fast path)", duration);
+                    duration
+                }
+                Err(probe_err) => {
+                    warn!(
+                        "FFmpeg duration probe failed: {}, falling back to full decode",
+                        probe_err
+                    );
+                    let decoded = decode_audio_file(path)?;
+                    decoded.duration_seconds
+                }
+            }
         }
     };
 
@@ -1013,6 +1028,8 @@ mod tests {
         assert!(AUDIO_EXTENSIONS.contains(&"mp4"));
         assert!(AUDIO_EXTENSIONS.contains(&"wav"));
         assert!(AUDIO_EXTENSIONS.contains(&"mp3"));
+        assert!(AUDIO_EXTENSIONS.contains(&"mov"));
+        assert!(AUDIO_EXTENSIONS.contains(&"avi"));
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
     }
 

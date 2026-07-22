@@ -1,10 +1,13 @@
-// Audio file decoder for retranscription feature
+// Audio/video file decoder for retranscription and import
 // Uses Symphonia to decode MP4/AAC audio files, with ffmpeg fallback for
-// formats Symphonia can't handle (MKV, WebM, WMA)
+// formats Symphonia can't handle (MKV, WebM, WMA, and most video containers).
+// FFmpeg strips video streams (-vn) and extracts audio only.
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
+use regex::Regex;
 use std::borrow::Cow;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -19,8 +22,13 @@ use symphonia::core::probe::Hint;
 use super::audio_processing::{audio_to_mono, resample, resample_audio};
 use super::ffmpeg::find_ffmpeg_path;
 
-/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
-const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma"];
+/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs).
+/// MOV is routed through ffmpeg too, despite being ISO-BMFF like MP4, because
+/// QuickTime-specific box variants (e.g. ProRes, timecode tracks) are not
+/// reliably handled by Symphonia's isomp4 demuxer.
+const FFMPEG_ONLY_EXTENSIONS: &[&str] = &[
+    "mkv", "webm", "wma", "mov", "avi", "flv", "ts", "mpg", "mpeg", "wmv", "3gp",
+];
 
 /// Progress callback for long-running operations
 /// Returns current progress (0-100) and a message
@@ -386,6 +394,65 @@ fn convert_to_wav_with_ffmpeg(
     );
 
     Ok(temp_path)
+}
+
+static FFMPEG_DURATION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d{2})").expect("valid duration regex")
+});
+
+/// Parse a "Duration: HH:MM:SS.ss" line out of ffmpeg's stderr output.
+fn parse_ffmpeg_duration(stderr_text: &str) -> Option<f64> {
+    let caps = FFMPEG_DURATION_RE.captures(stderr_text)?;
+    let hours: f64 = caps.get(1)?.as_str().parse().ok()?;
+    let minutes: f64 = caps.get(2)?.as_str().parse().ok()?;
+    let seconds: f64 = caps.get(3)?.as_str().parse().ok()?;
+    let centis: f64 = caps.get(4)?.as_str().parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds + centis / 100.0)
+}
+
+/// Fast duration probe via ffmpeg, without decoding any audio/video frames.
+///
+/// Runs `ffmpeg -i <path>` (no output file, so ffmpeg exits with an error after
+/// printing container metadata) and reads the duration from stderr. This is
+/// dramatically cheaper than [`decode_audio_file`] for large video files, since
+/// it only needs stream headers rather than every frame.
+///
+/// Used as a fast path for formats Symphonia can't probe (MKV, WebM, WMA, and
+/// most video containers) before falling back to a full decode.
+pub fn probe_duration_seconds(path: &Path) -> Result<f64> {
+    let ffmpeg_path = find_ffmpeg_path().ok_or_else(|| anyhow!("FFmpeg not found"))?;
+
+    let input_str = path
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid input path (non-UTF8)"))?;
+
+    let mut command = Command::new(&ffmpeg_path);
+    command
+        .args(["-i", input_str, "-hide_banner"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    // ffmpeg always exits non-zero here (no output file specified), so the
+    // duration line in stderr is read regardless of exit status.
+    let output = command
+        .output()
+        .map_err(|e| anyhow!("Failed to spawn ffmpeg process: {}", e))?;
+
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    parse_ffmpeg_duration(&stderr_text).ok_or_else(|| {
+        anyhow!(
+            "Could not find duration in ffmpeg output: {}",
+            stderr_text.lines().find(|l| l.contains("Duration")).unwrap_or("<no Duration line>")
+        )
+    })
 }
 
 /// Decode an audio file (MP4, M4A, WAV, etc.) to raw samples
@@ -803,16 +870,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ffmpeg_duration() {
+        let stderr = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'meeting.mov':\n  Duration: 01:23:45.67, start: 0.000000, bitrate: 512 kb/s\n";
+        let duration = parse_ffmpeg_duration(stderr).expect("should parse duration");
+        let expected = 1.0 * 3600.0 + 23.0 * 60.0 + 45.67;
+        assert!((duration - expected).abs() < 0.01, "got {}", duration);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_duration_zero() {
+        let stderr = "  Duration: 00:00:00.50, start: 0.000000, bitrate: N/A\n";
+        let duration = parse_ffmpeg_duration(stderr).expect("should parse duration");
+        assert!((duration - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_duration_missing() {
+        let stderr = "ffmpeg version 6.0\nsome unrelated error output\n";
+        assert!(parse_ffmpeg_duration(stderr).is_none());
+    }
+
+    #[test]
     fn test_needs_ffmpeg_conversion() {
         assert!(needs_ffmpeg_conversion(Path::new("video.mkv")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.webm")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.wma")));
+        // Video containers
+        assert!(needs_ffmpeg_conversion(Path::new("video.mov")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.avi")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.flv")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.ts")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.mpg")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.mpeg")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.wmv")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.3gp")));
         // Case insensitive
         assert!(needs_ffmpeg_conversion(Path::new("meeting.MKV")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WMA")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WebM")));
+        assert!(needs_ffmpeg_conversion(Path::new("video.MOV")));
         // Symphonia-native formats should NOT need ffmpeg
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp4")));
+        assert!(!needs_ffmpeg_conversion(Path::new("video.m4v")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.wav")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp3")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.flac")));

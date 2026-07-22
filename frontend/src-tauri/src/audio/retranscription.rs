@@ -1009,6 +1009,11 @@ mod tests {
         assert!(AUDIO_EXTENSIONS.contains(&"mkv"));
         assert!(AUDIO_EXTENSIONS.contains(&"webm"));
         assert!(AUDIO_EXTENSIONS.contains(&"wma"));
+        // Video containers
+        assert!(AUDIO_EXTENSIONS.contains(&"mov"));
+        assert!(AUDIO_EXTENSIONS.contains(&"avi"));
+        assert!(AUDIO_EXTENSIONS.contains(&"m4v"));
+        assert!(AUDIO_EXTENSIONS.contains(&"3gp"));
         // Non-audio formats
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));

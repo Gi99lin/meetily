@@ -37,6 +37,7 @@ import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { getAudioFormatsDisplayList } from '@/constants/audioFormats';
 
 
 interface ImportAudioDialogProps {
@@ -251,7 +252,7 @@ export function ImportAudioDialog({
             ) : (
               <>
                 <Upload className="h-5 w-5 text-blue-600" />
-                Import Audio File
+                Import Audio or Video File
               </>
             )}
           </DialogTitle>
@@ -260,7 +261,7 @@ export function ImportAudioDialog({
               ? progress?.message || 'Processing audio...'
               : error
               ? 'An error occurred during import'
-              : 'Import an audio file to create a new meeting with transcripts'}
+              : 'Import an audio or video file to create a new meeting with transcripts'}
           </DialogDescription>
         </DialogHeader>
 
@@ -317,11 +318,11 @@ export function ImportAudioDialog({
                     ) : (
                       <>
                         <Upload className="h-4 w-4 mr-2" />
-                        Select Audio File
+                        Select Audio or Video File
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
+                  <p className="text-sm text-gray-500 mt-2">{getAudioFormatsDisplayList()}</p>
                 </div>
               )}
 
