@@ -194,19 +194,21 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
-                <Tooltip>
-                    <TooltipTrigger>
-                        <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">
-                            {formatRecordingTime(timestamp)}
-                        </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                        {confidence !== undefined && showConfidence && (
-                            <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
-                        )}
-                    </TooltipContent>
-                </Tooltip>
-                <SpeakerBadge speaker={speaker} speakerNames={speakerNames} onRename={onRenameSpeaker} />
+                <div className="flex flex-col items-start gap-1 flex-shrink-0 min-w-[50px] mt-1">
+                    <Tooltip>
+                        <TooltipTrigger>
+                            <span className="text-xs text-gray-400">
+                                {formatRecordingTime(timestamp)}
+                            </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                            {confidence !== undefined && showConfidence && (
+                                <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
+                            )}
+                        </TooltipContent>
+                    </Tooltip>
+                    <SpeakerBadge speaker={speaker} speakerNames={speakerNames} onRename={onRenameSpeaker} />
+                </div>
                 <div className="flex-1">
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
