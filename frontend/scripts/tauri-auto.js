@@ -34,6 +34,16 @@ if (process.env.TAURI_GPU_FEATURE) {
   }
 }
 
+// Non-GPU app features (comma-separated). Defaults to speaker diarization;
+// set TAURI_EXTRA_FEATURES='' to build without it.
+const extraFeatures =
+  process.env.TAURI_EXTRA_FEATURES !== undefined
+    ? process.env.TAURI_EXTRA_FEATURES
+    : 'diarization';
+if (extraFeatures) {
+  console.log(`🎙️  Extra features: ${extraFeatures}`);
+}
+
 console.log(''); // Empty line for spacing
 
 // Platform-specific environment variables
@@ -48,10 +58,13 @@ if (platform === 'linux' && feature === 'cuda') {
 }
 
 // Build the tauri command
+const featureList = [feature && feature !== 'none' ? feature : '', extraFeatures]
+  .filter(Boolean)
+  .join(',');
 let tauriCmd = `tauri ${command}`;
-if (feature && feature !== 'none') {
-  tauriCmd += ` -- --features ${feature}`;
-  console.log(`🚀 Running: tauri ${command} with features: ${feature}`);
+if (featureList) {
+  tauriCmd += ` -- --features ${featureList}`;
+  console.log(`🚀 Running: tauri ${command} with features: ${featureList}`);
 } else {
   console.log(`🚀 Running: tauri ${command} (CPU-only mode)`);
 }
