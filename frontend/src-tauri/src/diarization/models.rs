@@ -77,7 +77,7 @@ mod download {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
-    pub type ProgressCallback = Box<dyn Fn(&str, u8) + Send>;
+    pub type ProgressCallback = Box<dyn Fn(&str, u8) + Send + Sync>;
 
     /// Download both diarization models if missing, extracting the
     /// segmentation archive. `progress` receives (stage_name, percent).
