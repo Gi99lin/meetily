@@ -18,6 +18,11 @@ import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
 
+const TRANSCRIPT_PANEL_WIDTH_KEY = 'meetily-transcript-panel-width';
+const DEFAULT_TRANSCRIPT_PANEL_WIDTH = 420;
+const MIN_TRANSCRIPT_PANEL_WIDTH = 280;
+const MAX_TRANSCRIPT_PANEL_WIDTH = 800;
+
 export default function PageContent({
   meeting,
   summaryData,
@@ -57,6 +62,48 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
+
+  // Resizable transcript panel width, persisted across sessions. A ref
+  // tracks the live value during drag so the mousemove/mouseup handlers
+  // (attached once per drag, not re-created on every render) always read
+  // the latest width instead of a stale closure.
+  const [transcriptPanelWidth, setTranscriptPanelWidth] = useState(DEFAULT_TRANSCRIPT_PANEL_WIDTH);
+  const transcriptPanelWidthRef = useRef(DEFAULT_TRANSCRIPT_PANEL_WIDTH);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(TRANSCRIPT_PANEL_WIDTH_KEY);
+    if (!saved) return;
+    const parsed = parseInt(saved, 10);
+    if (Number.isNaN(parsed)) return;
+    const clamped = Math.min(MAX_TRANSCRIPT_PANEL_WIDTH, Math.max(MIN_TRANSCRIPT_PANEL_WIDTH, parsed));
+    setTranscriptPanelWidth(clamped);
+    transcriptPanelWidthRef.current = clamped;
+  }, []);
+
+  const handlePanelResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = transcriptPanelWidthRef.current;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const newWidth = Math.min(
+        MAX_TRANSCRIPT_PANEL_WIDTH,
+        Math.max(MIN_TRANSCRIPT_PANEL_WIDTH, startWidth + delta)
+      );
+      transcriptPanelWidthRef.current = newWidth;
+      setTranscriptPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      localStorage.setItem(TRANSCRIPT_PANEL_WIDTH_KEY, String(transcriptPanelWidthRef.current));
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -171,26 +218,33 @@ export default function PageContent({
       className="flex flex-col h-screen bg-gray-50"
     >
       <div className="flex flex-1 overflow-hidden">
-        <TranscriptPanel
-          transcripts={meetingData.transcripts}
-          customPrompt={customPrompt}
-          onPromptChange={setCustomPrompt}
-          onCopyTranscript={copyOperations.handleCopyTranscript}
-          onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
-          isRecording={isRecording}
-          disableAutoScroll={true}
-          // Pagination props for efficient loading
-          usePagination={true}
-          segments={segments}
-          hasMore={hasMore}
-          isLoadingMore={isLoadingMore}
-          totalCount={totalCount}
-          loadedCount={loadedCount}
-          onLoadMore={onLoadMore}
-          // Retranscription props
-          meetingId={meeting.id}
-          meetingFolderPath={meeting.folder_path}
-          onRefetchTranscripts={onRefetchTranscripts}
+        <div className="hidden md:flex flex-shrink-0 h-full" style={{ width: transcriptPanelWidth }}>
+          <TranscriptPanel
+            transcripts={meetingData.transcripts}
+            customPrompt={customPrompt}
+            onPromptChange={setCustomPrompt}
+            onCopyTranscript={copyOperations.handleCopyTranscript}
+            onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
+            isRecording={isRecording}
+            disableAutoScroll={true}
+            // Pagination props for efficient loading
+            usePagination={true}
+            segments={segments}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            totalCount={totalCount}
+            loadedCount={loadedCount}
+            onLoadMore={onLoadMore}
+            // Retranscription props
+            meetingId={meeting.id}
+            meetingFolderPath={meeting.folder_path}
+            onRefetchTranscripts={onRefetchTranscripts}
+          />
+        </div>
+        <div
+          onMouseDown={handlePanelResizeStart}
+          className="hidden md:block w-1 flex-shrink-0 cursor-col-resize bg-gray-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+          title="Drag to resize"
         />
         <SummaryPanel
           meeting={meeting}
