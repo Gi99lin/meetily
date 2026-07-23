@@ -32,8 +32,17 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "frontend/src-tauri -> target"
+          workspaces: ". -> target"
           key: check-rust-macos-latest
+
+      - name: Build llama-helper sidecar
+        # Tauri's build script checks `externalBin` resources exist on disk
+        # even for `cargo check`, so this sidecar must exist before anything
+        # in frontend/src-tauri can be checked/built (see build-macos.yml).
+        run: |
+          cargo build --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
 
       - name: cargo check (default features)
         working-directory: frontend/src-tauri
