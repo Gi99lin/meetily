@@ -1,0 +1,48 @@
+name: "Check Rust (no bundling)"
+
+# Lightweight cargo check/test on macos-latest (which has full Xcode
+# preinstalled) to validate the Tauri Rust core, including the optional
+# `diarization` feature, without building/signing a release bundle.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-rust:
+    name: cargo check/test (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "frontend/src-tauri -> target"
+          key: check-rust-macos-latest
+
+      - name: cargo check (default features)
+        working-directory: frontend/src-tauri
+        run: cargo check --target aarch64-apple-darwin
+
+      - name: cargo check (diarization feature)
+        working-directory: frontend/src-tauri
+        run: cargo check --target aarch64-apple-darwin --features diarization
+
+      - name: cargo test (diarization feature)
+        working-directory: frontend/src-tauri
+        run: cargo test --target aarch64-apple-darwin --features diarization
