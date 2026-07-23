@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw, Users, Loader2 } from 'lucide-react';
@@ -35,6 +35,54 @@ export function TranscriptButtonGroup({
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
+
+  // isDiarizing is local state, so it resets on unmount even though the
+  // backend task keeps running (e.g. navigating to Settings and back).
+  // On mount, check whether this meeting actually has a run in progress;
+  // if so, keep polling until it finishes, then refetch to pick up the
+  // results — the original invocation's own refetch may have been lost
+  // to that same unmount.
+  useEffect(() => {
+    if (!meetingId) return;
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const checkStatus = async (): Promise<boolean> => {
+      const running = await diarizationService.isDiarizationRunning(meetingId);
+      if (!cancelled) setIsDiarizing(running);
+      return running;
+    };
+
+    (async () => {
+      try {
+        const running = await checkStatus();
+        if (!running || cancelled) return;
+        intervalId = setInterval(async () => {
+          try {
+            const stillRunning = await checkStatus();
+            if (!stillRunning && intervalId) {
+              clearInterval(intervalId);
+              intervalId = null;
+              if (!cancelled) {
+                await onRefetchTranscripts?.();
+                await onRefetchSpeakerNames?.();
+              }
+            }
+          } catch {
+            // Transient status-check failure; retry on the next tick.
+          }
+        }, 3000);
+      } catch {
+        // Transient failure on the initial check; assume not running.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingId]);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data

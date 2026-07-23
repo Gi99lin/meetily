@@ -50,6 +50,22 @@ pub async fn get_meeting_speaker_names(
         .map_err(|e| e.to_string())
 }
 
+/// Whether a diarization run is currently in progress for this meeting.
+/// Lets the frontend restore the correct button state after navigating
+/// away and back — the actual Tokio task keeps running server-side even
+/// though any component-local "isDiarizing" state resets on unmount.
+#[tauri::command]
+pub async fn is_diarization_running(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<bool, String> {
+    Ok(state
+        .diarizing_meetings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&meeting_id))
+}
+
 #[tauri::command]
 pub async fn rename_meeting_speaker(
     state: tauri::State<'_, AppState>,
@@ -101,13 +117,42 @@ pub async fn run_speaker_diarization<R: Runtime>(
     state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<SpeakerDiarizationResult, String> {
+    {
+        let mut in_progress = state
+            .diarizing_meetings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !in_progress.insert(meeting_id.clone()) {
+            return Err(
+                "Speaker detection is already running for this meeting.".to_string(),
+            );
+        }
+    }
+
+    let result = run_speaker_diarization_inner(&app, &state, meeting_id.clone()).await;
+
+    state
+        .diarizing_meetings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&meeting_id);
+
+    result
+}
+
+#[cfg(feature = "diarization")]
+async fn run_speaker_diarization_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<SpeakerDiarizationResult, String> {
     use crate::audio::decoder::decode_audio_file;
     use crate::audio::retranscription::find_audio_file;
     use crate::database::repositories::meeting::MeetingsRepository;
     use crate::database::repositories::transcript::TranscriptsRepository;
     use super::engine::{dominant_speaker_key_for_range, DiarizationEngine};
 
-    let dir = models_dir(&app);
+    let dir = models_dir(app);
     let status = models::check_models_status(&dir);
     if !status.all_ready() {
         return Err(
