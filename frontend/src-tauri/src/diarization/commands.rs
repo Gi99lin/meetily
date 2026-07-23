@@ -66,6 +66,22 @@ pub async fn is_diarization_running(
         .contains(&meeting_id))
 }
 
+/// Whether this meeting already has ML-diarized speaker labels, so the
+/// frontend can confirm before letting the user re-run detection (which
+/// re-decodes the whole recording and can take several minutes).
+#[tauri::command]
+pub async fn has_diarization_results(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<bool, String> {
+    crate::database::repositories::transcript::TranscriptsRepository::has_ml_speaker_labels(
+        state.db_manager.pool(),
+        &meeting_id,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn rename_meeting_speaker(
     state: tauri::State<'_, AppState>,

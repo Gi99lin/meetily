@@ -22,6 +22,10 @@ export const diarizationService = {
     return invoke<boolean>('is_diarization_running', { meetingId });
   },
 
+  async hasResults(meetingId: string): Promise<boolean> {
+    return invoke<boolean>('has_diarization_results', { meetingId });
+  },
+
   async getSpeakerNames(meetingId: string): Promise<MeetingSpeaker[]> {
     return invoke<MeetingSpeaker[]>('get_meeting_speaker_names', { meetingId });
   },

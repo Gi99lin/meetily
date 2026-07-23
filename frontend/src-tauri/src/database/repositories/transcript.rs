@@ -23,6 +23,26 @@ impl TranscriptsRepository {
         .await
     }
 
+    /// Whether ML diarization has already labeled any segment in this
+    /// meeting (speaker keys are always "speaker_NN" — see
+    /// diarization::engine::speaker_key). Used to warn before re-running
+    /// the (slow) detection a second time on the same recording.
+    pub async fn has_ml_speaker_labels(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<bool, SqlxError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT EXISTS(
+                SELECT 1 FROM transcripts
+                WHERE meeting_id = ? AND speaker LIKE 'speaker\\_%' ESCAPE '\\'
+            )",
+        )
+        .bind(meeting_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0 != 0)
+    }
+
     /// Overwrite the `speaker` label for a single transcript row.
     pub async fn update_speaker(
         pool: &SqlitePool,

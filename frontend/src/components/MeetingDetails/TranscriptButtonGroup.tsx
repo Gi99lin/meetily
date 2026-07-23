@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw, Users, Loader2 } from 'lucide-react';
@@ -35,6 +35,45 @@ export function TranscriptButtonGroup({
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
+  const [hasResults, setHasResults] = useState(false);
+
+  // Text labels are hidden below a pixel threshold measured on this row's
+  // own container, not Tailwind's viewport breakpoints — the transcript
+  // panel is now user-resizable, so a `lg:` class would show labels based
+  // on the whole window's width regardless of how narrow this panel
+  // actually is, clipping the button row exactly as reported.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [showLabels, setShowLabels] = useState(true);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      setShowLabels(width > 380);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Check once whether this meeting already has ML speaker labels, so a
+  // click on "Detect Speakers" can confirm before re-running (it re-decodes
+  // the whole recording and can take several minutes).
+  useEffect(() => {
+    if (!meetingId) return;
+    let cancelled = false;
+    diarizationService
+      .hasResults(meetingId)
+      .then((result) => {
+        if (!cancelled) setHasResults(result);
+      })
+      .catch(() => {
+        // Transient failure; leave hasResults as-is (defaults to false).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId]);
 
   // isDiarizing is local state, so it resets on unmount even though the
   // backend task keeps running (e.g. navigating to Settings and back).
@@ -64,6 +103,7 @@ export function TranscriptButtonGroup({
               clearInterval(intervalId);
               intervalId = null;
               if (!cancelled) {
+                setHasResults(true);
                 await onRefetchTranscripts?.();
                 await onRefetchSpeakerNames?.();
               }
@@ -94,6 +134,14 @@ export function TranscriptButtonGroup({
   const handleDetectSpeakers = useCallback(async () => {
     if (!meetingId || isDiarizing) return;
 
+    if (hasResults) {
+      const confirmed = window.confirm(
+        'Speakers were already detected for this recording. Re-run detection? ' +
+        'This re-processes the whole recording and can take several minutes.'
+      );
+      if (!confirmed) return;
+    }
+
     setIsDiarizing(true);
     try {
       const status = await diarizationService.getModelsStatus();
@@ -106,6 +154,7 @@ export function TranscriptButtonGroup({
       toast.success(
         `Found ${result.num_speakers} speaker(s), labeled ${result.segments_updated} segment(s).`
       );
+      setHasResults(true);
 
       await onRefetchTranscripts?.();
       await onRefetchSpeakerNames?.();
@@ -116,10 +165,10 @@ export function TranscriptButtonGroup({
     } finally {
       setIsDiarizing(false);
     }
-  }, [meetingId, isDiarizing, onRefetchTranscripts, onRefetchSpeakerNames]);
+  }, [meetingId, isDiarizing, hasResults, onRefetchTranscripts, onRefetchSpeakerNames]);
 
   return (
-    <div className="flex items-center justify-center w-full gap-2">
+    <div ref={containerRef} className="flex items-center justify-center w-full gap-2">
       <ButtonGroup>
         <Button
           variant="outline"
@@ -131,37 +180,36 @@ export function TranscriptButtonGroup({
           disabled={transcriptCount === 0}
           title={transcriptCount === 0 ? 'No transcript available' : 'Copy Transcript'}
         >
-          <Copy />
-          <span className="hidden lg:inline">Copy</span>
+          <Copy className={showLabels ? 'mr-2' : ''} size={18} />
+          {showLabels && <span>Copy</span>}
         </Button>
 
         <Button
           size="sm"
           variant="outline"
-          className="xl:px-4"
           onClick={() => {
             Analytics.trackButtonClick('open_recording_folder', 'meeting_details');
             onOpenMeetingFolder();
           }}
           title="Open Recording Folder"
         >
-          <FolderOpen className="xl:mr-2" size={18} />
-          <span className="hidden lg:inline">Recording</span>
+          <FolderOpen className={showLabels ? 'mr-2' : ''} size={18} />
+          {showLabels && <span>Recording</span>}
         </Button>
 
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
           <Button
             size="sm"
             variant="outline"
-            className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 xl:px-4"
+            className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200"
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);
             }}
             title="Retranscribe to enhance your recorded audio"
           >
-            <RefreshCw className="xl:mr-2" size={18} />
-            <span className="hidden lg:inline">Enhance</span>
+            <RefreshCw className={showLabels ? 'mr-2' : ''} size={18} />
+            {showLabels && <span>Enhance</span>}
           </Button>
         )}
 
@@ -169,20 +217,21 @@ export function TranscriptButtonGroup({
           <Button
             size="sm"
             variant="outline"
-            className="xl:px-4"
             onClick={() => {
               Analytics.trackButtonClick('detect_speakers', 'meeting_details');
               handleDetectSpeakers();
             }}
             disabled={isDiarizing || transcriptCount === 0}
-            title="Detect distinct speakers in this recording"
+            title={hasResults ? 'Re-run speaker detection' : 'Detect distinct speakers in this recording'}
           >
             {isDiarizing ? (
-              <Loader2 className="xl:mr-2 animate-spin" size={18} />
+              <Loader2 className={`animate-spin ${showLabels ? 'mr-2' : ''}`} size={18} />
             ) : (
-              <Users className="xl:mr-2" size={18} />
+              <Users className={showLabels ? 'mr-2' : ''} size={18} />
             )}
-            <span className="hidden lg:inline">{isDiarizing ? 'Detecting...' : 'Speakers'}</span>
+            {showLabels && (
+              <span>{isDiarizing ? 'Detecting...' : hasResults ? 'Re-detect Speakers' : 'Detect Speakers'}</span>
+            )}
           </Button>
         )}
       </ButtonGroup>
