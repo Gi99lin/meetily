@@ -120,7 +120,6 @@ jobs:
             compgen -G 'target/aarch64-apple-darwin/release/bundle/dmg/*.dmg' >/dev/null
           else
             compgen -G 'target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi' >/dev/null
-            compgen -G 'target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe' >/dev/null
           fi
 
       - name: Upload installers
