@@ -38,11 +38,10 @@ jobs:
             app-features: vulkan,diarization
             cmake-msvc-runtime: MultiThreaded
             cmake-msvc-runtime-policy: NEW
-            bundles: msi,nsis
+            bundles: msi
             artifact-name: meetily-windows-x64-${{ github.sha }}
             artifact-path: |
               target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-              target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
 
     steps:
       - name: Checkout selected commit
