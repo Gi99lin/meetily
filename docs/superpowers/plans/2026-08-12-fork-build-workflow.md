@@ -79,7 +79,6 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             app-features: vulkan,diarization
-            helper-features: vulkan
             bundles: msi,nsis
             artifact-name: meetily-windows-x64-${{ github.sha }}
             artifact-path: |
@@ -120,7 +119,11 @@ jobs:
       - name: Build llama-helper sidecar
         shell: bash
         run: |
-          cargo build --release -p llama-helper --features "${{ matrix.helper-features }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cargo build --release -p llama-helper
+          else
+            cargo build --release -p llama-helper --features "${{ matrix.helper-features }}"
+          fi
           extension=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then extension=".exe"; fi
           mkdir -p frontend/src-tauri/binaries
@@ -135,6 +138,7 @@ jobs:
             --target ${{ matrix.target }}
             --bundles ${{ matrix.bundles }}
             --features ${{ matrix.app-features }}
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Verify expected bundles
         shell: bash
         run: |
