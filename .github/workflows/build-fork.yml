@@ -37,6 +37,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             app-features: vulkan,diarization
             cmake-msvc-runtime: MultiThreaded
+            cmake-msvc-runtime-policy: NEW
             bundles: msi,nsis
             artifact-name: meetily-windows-x64-${{ github.sha }}
             artifact-path: |
@@ -104,6 +105,7 @@ jobs:
           # sherpa-onnx's Windows static archive is built with /MT. Build
           # whisper.cpp with the same CRT to avoid LNK2038/LNK2005 conflicts.
           CMAKE_MSVC_RUNTIME_LIBRARY: ${{ matrix.cmake-msvc-runtime }}
+          CMAKE_POLICY_DEFAULT_CMP0091: ${{ matrix.cmake-msvc-runtime-policy }}
         with:
           projectPath: frontend
           args: >-
