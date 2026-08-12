@@ -6,7 +6,7 @@
 
 **Architecture:** One manually dispatched workflow uses a two-entry matrix. Matrix values select the runner, Rust target, acceleration features, Tauri bundles, and artifact paths while shared steps install dependencies, build the sidecar and app, verify bundles, and upload artifacts.
 
-**Tech Stack:** GitHub Actions, Tauri 2, Rust stable, Node.js 20, pnpm 8, `tauri-apps/tauri-action@v0`, `actions/upload-artifact@v4`.
+**Tech Stack:** GitHub Actions, Tauri 2, Rust stable, Node.js 20, pnpm 11.16.0, `tauri-apps/tauri-action@v0`, `actions/upload-artifact@v4`.
 
 ## Global Constraints
 
@@ -91,7 +91,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 8
+          version: 11.16.0
           run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
