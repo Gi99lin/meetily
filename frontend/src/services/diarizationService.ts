@@ -18,6 +18,10 @@ export const diarizationService = {
     return invoke<SpeakerDiarizationResult>('run_speaker_diarization', { meetingId });
   },
 
+  async enqueueDiarization(meetingId: string): Promise<void> {
+    return invoke<void>('enqueue_speaker_diarization', { meetingId });
+  },
+
   async isDiarizationRunning(meetingId: string): Promise<boolean> {
     return invoke<boolean>('is_diarization_running', { meetingId });
   },

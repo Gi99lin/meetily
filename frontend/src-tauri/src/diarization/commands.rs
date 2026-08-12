@@ -9,12 +9,13 @@ use crate::database::repositories::speaker::{MeetingSpeaker, SpeakersRepository}
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
+#[cfg(feature = "diarization")]
+use tauri::Emitter;
 
 use super::models::{self, DiarizationModelsStatus};
 
 #[allow(dead_code)] // only read by the stub bodies compiled when the `diarization` feature is off
-const NOT_AVAILABLE_MSG: &str =
-    "Speaker diarization is not available in this build. Rebuild with `--features diarization` to enable it.";
+const NOT_AVAILABLE_MSG: &str = "Speaker diarization is not available in this build. Rebuild with `--features diarization` to enable it.";
 
 fn models_dir<R: Runtime>(app: &AppHandle<R>) -> std::path::PathBuf {
     app.path()
@@ -28,6 +29,27 @@ pub struct SpeakerDiarizationResult {
     pub meeting_id: String,
     pub num_speakers: i32,
     pub segments_updated: usize,
+}
+
+#[cfg(feature = "diarization")]
+#[derive(Debug, Clone, Serialize)]
+struct DiarizationStatus<'a> {
+    meeting_id: &'a str,
+    stage: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+#[cfg(feature = "diarization")]
+fn emit_status<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, stage: &str, error: Option<&str>) {
+    let _ = app.emit(
+        "diarization-status",
+        DiarizationStatus {
+            meeting_id,
+            stage,
+            error,
+        },
+    );
 }
 
 /// Cheap, feature-independent check of whether both models are downloaded.
@@ -92,9 +114,14 @@ pub async fn rename_meeting_speaker(
     if display_name.trim().is_empty() {
         return Err("Display name cannot be empty".to_string());
     }
-    SpeakersRepository::rename(state.db_manager.pool(), &meeting_id, &speaker_key, &display_name)
-        .await
-        .map_err(|e| e.to_string())
+    SpeakersRepository::rename(
+        state.db_manager.pool(),
+        &meeting_id,
+        &speaker_key,
+        &display_name,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "diarization")]
@@ -130,28 +157,79 @@ pub async fn download_diarization_models<R: Runtime>(_app: AppHandle<R>) -> Resu
 #[tauri::command]
 pub async fn run_speaker_diarization<R: Runtime>(
     app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<SpeakerDiarizationResult, String> {
+    begin_job(&app, &meeting_id)?;
+    execute_claimed_job(app, meeting_id).await
+}
+
+#[cfg(feature = "diarization")]
+#[tauri::command]
+pub async fn enqueue_speaker_diarization<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<(), String> {
+    begin_job(&app, &meeting_id)?;
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = execute_claimed_job(app, meeting_id).await {
+            log::error!("Automatic speaker diarization failed: {}", error);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(feature = "diarization")]
+fn begin_job<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
     {
         let mut in_progress = state
             .diarizing_meetings
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !in_progress.insert(meeting_id.clone()) {
-            return Err(
-                "Speaker detection is already running for this meeting.".to_string(),
-            );
+        if !in_progress.insert(meeting_id.to_string()) {
+            return Err("Speaker detection is already running for this meeting.".to_string());
         }
     }
+    emit_status(app, meeting_id, "queued", None);
+    Ok(())
+}
 
-    let result = run_speaker_diarization_inner(&app, &state, meeting_id.clone()).await;
+#[cfg(feature = "diarization")]
+async fn execute_claimed_job<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<SpeakerDiarizationResult, String> {
+    // Recording start uses this same lifecycle lock. Holding it for the full
+    // offline pass prevents a new live ASR session from starting while
+    // diarization is running.
+    let _engine_lifecycle_guard =
+        crate::audio::common::acquire_engine_lifecycle_lock().await;
+    let permit = {
+        let state = app.state::<AppState>();
+        state
+            .diarization_permit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "Speaker diarization queue was closed".to_string())?
+    };
 
-    state
-        .diarizing_meetings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&meeting_id);
+    let result = run_speaker_diarization_inner(&app, meeting_id.clone()).await;
+    drop(permit);
+
+    {
+        let state = app.state::<AppState>();
+        state
+            .diarizing_meetings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&meeting_id);
+    }
+
+    match &result {
+        Ok(_) => emit_status(&app, &meeting_id, "complete", None),
+        Err(error) => emit_status(&app, &meeting_id, "failed", Some(error)),
+    }
 
     result
 }
@@ -159,14 +237,19 @@ pub async fn run_speaker_diarization<R: Runtime>(
 #[cfg(feature = "diarization")]
 async fn run_speaker_diarization_inner<R: Runtime>(
     app: &AppHandle<R>,
-    state: &tauri::State<'_, AppState>,
     meeting_id: String,
 ) -> Result<SpeakerDiarizationResult, String> {
+    use super::engine::{dominant_speaker_key_for_range, DiarizationEngine};
     use crate::audio::decoder::decode_audio_file;
     use crate::audio::retranscription::find_audio_file;
     use crate::database::repositories::meeting::MeetingsRepository;
     use crate::database::repositories::transcript::TranscriptsRepository;
-    use super::engine::{dominant_speaker_key_for_range, DiarizationEngine};
+
+    if crate::audio::recording_commands::is_recording().await {
+        return Err(
+            "Speaker diarization waits until the active recording has finished.".to_string(),
+        );
+    }
 
     let dir = models_dir(app);
     let status = models::check_models_status(&dir);
@@ -176,7 +259,7 @@ async fn run_speaker_diarization_inner<R: Runtime>(
         );
     }
 
-    let pool = state.db_manager.pool().clone();
+    let pool = app.state::<AppState>().db_manager.pool().clone();
 
     let meeting = MeetingsRepository::get_meeting_metadata(&pool, &meeting_id)
         .await
@@ -197,13 +280,16 @@ async fn run_speaker_diarization_inner<R: Runtime>(
     let segmentation_path = models::segmentation_model_path(&dir);
     let embedding_path = models::embedding_model_path(&dir);
 
-    // Both audio decode/resample and ONNX inference are CPU-bound and
-    // synchronous; run them off the async runtime so the Tauri event loop
-    // (and this command's own long await) doesn't stall other work.
-    let diarized = tokio::task::spawn_blocking(move || -> Result<_, String> {
+    emit_status(app, &meeting_id, "decoding", None);
+    let samples = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let decoded = decode_audio_file(&audio_path).map_err(|e| e.to_string())?;
-        let samples = decoded.to_whisper_format(); // 16kHz mono f32
+        Ok(decoded.to_whisper_format()) // 16kHz mono f32
+    })
+    .await
+    .map_err(|e| format!("Audio decoding task panicked: {}", e))??;
 
+    emit_status(app, &meeting_id, "processing", None);
+    let diarized = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let engine = DiarizationEngine::new(&segmentation_path, &embedding_path)
             .map_err(|e| e.to_string())?;
 
@@ -227,7 +313,7 @@ async fn run_speaker_diarization_inner<R: Runtime>(
         .collect::<std::collections::HashSet<_>>()
         .len() as i32;
 
-    let mut segments_updated = 0usize;
+    let mut assignments = Vec::new();
     for transcript in &transcripts {
         if transcript.speaker.as_deref() == Some("mic") {
             continue; // Keep the caller's own high-confidence "You" tag as-is.
@@ -239,14 +325,15 @@ async fn run_speaker_diarization_inner<R: Runtime>(
         };
 
         if let Some(new_speaker) = dominant_speaker_key_for_range(&diarized, start, end) {
-            if transcript.speaker.as_deref() != Some(new_speaker.as_str()) {
-                TranscriptsRepository::update_speaker(&pool, &transcript.id, Some(new_speaker.as_str()))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                segments_updated += 1;
-            }
+            assignments.push((transcript.id.clone(), new_speaker));
         }
     }
+
+    let segments_updated = assignments.len();
+    emit_status(app, &meeting_id, "saving", None);
+    TranscriptsRepository::replace_diarization_results(&pool, &meeting_id, &assignments)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(SpeakerDiarizationResult {
         meeting_id,
@@ -263,4 +350,36 @@ pub async fn run_speaker_diarization<R: Runtime>(
     _meeting_id: String,
 ) -> Result<SpeakerDiarizationResult, String> {
     Err(NOT_AVAILABLE_MSG.to_string())
+}
+
+#[cfg(not(feature = "diarization"))]
+#[tauri::command]
+pub async fn enqueue_speaker_diarization<R: Runtime>(
+    _app: AppHandle<R>,
+    _meeting_id: String,
+) -> Result<(), String> {
+    Err(NOT_AVAILABLE_MSG.to_string())
+}
+
+#[cfg(all(test, feature = "diarization"))]
+mod tests {
+    use crate::state::single_job_semaphore;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn diarization_jobs_are_serialized() {
+        let semaphore = single_job_semaphore();
+        let first = semaphore.clone().acquire_owned().await.unwrap();
+        let waiting = semaphore.clone();
+        let second = tokio::spawn(async move { waiting.acquire_owned().await.unwrap() });
+
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+
+        drop(first);
+        let _second_permit = tokio::time::timeout(Duration::from_millis(100), second)
+            .await
+            .expect("second job should start after the first permit is released")
+            .unwrap();
+    }
 }

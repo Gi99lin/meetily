@@ -439,10 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_mic_detection() {
-        let kind = InputDeviceKind::detect("MacBook Pro Microphone", 0, 0);
-        // Should fall through to Unknown (no Bluetooth pattern, no buffer size)
-        assert_eq!(kind, InputDeviceKind::Unknown);
+    fn test_builtin_mic_name_has_no_bluetooth_heuristic() {
+        let kind = InputDeviceKind::detect_by_name("MacBook Pro Microphone");
+        assert_eq!(kind, None);
     }
 
     #[test]

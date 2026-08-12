@@ -1,7 +1,7 @@
 use crate::api::{TranscriptSearchResult, TranscriptSegment};
 use crate::database::models::Transcript;
 use chrono::Utc;
-use sqlx::{Connection, Error as SqlxError, SqlitePool};
+use sqlx::{Acquire, Error as SqlxError, SqlitePool};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -54,6 +54,49 @@ impl TranscriptsRepository {
             .bind(transcript_id)
             .execute(pool)
             .await?;
+        Ok(())
+    }
+
+    /// Atomically replace every ML-derived speaker label for a meeting.
+    /// High-confidence `mic` labels survive; unmatched non-mic rows and
+    /// cluster display names are cleared because cluster indices can change
+    /// between diarization runs.
+    pub async fn replace_diarization_results(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        assignments: &[(String, String)],
+    ) -> Result<(), SqlxError> {
+        let mut transaction = pool.begin().await?;
+
+        sqlx::query(
+            "UPDATE transcripts
+             SET speaker = NULL
+             WHERE meeting_id = ? AND (speaker IS NULL OR speaker != 'mic')",
+        )
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        for (transcript_id, speaker_key) in assignments {
+            sqlx::query(
+                "UPDATE transcripts
+                 SET speaker = ?
+                 WHERE id = ? AND meeting_id = ?
+                   AND (speaker IS NULL OR speaker != 'mic')",
+            )
+            .bind(speaker_key)
+            .bind(transcript_id)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -193,5 +236,96 @@ impl TranscriptsRepository {
             }
             None => transcript.chars().take(200).collect(), // Fallback to the start of the transcript
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn replace_diarization_results_is_atomic_and_clears_stale_state() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                speaker TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE meeting_speakers (
+                meeting_id TEXT NOT NULL,
+                speaker_key TEXT NOT NULL,
+                display_name TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (id, speaker) in [
+            ("mic-segment", "mic"),
+            ("matched-segment", "speaker_00"),
+            ("unmatched-segment", "speaker_01"),
+        ] {
+            sqlx::query(
+                "INSERT INTO transcripts (id, meeting_id, speaker) VALUES (?, 'meeting-1', ?)",
+            )
+            .bind(id)
+            .bind(speaker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO meeting_speakers (meeting_id, speaker_key, display_name)
+             VALUES ('meeting-1', 'speaker_00', 'Alice')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        TranscriptsRepository::replace_diarization_results(
+            &pool,
+            "meeting-1",
+            &[("matched-segment".to_string(), "speaker_02".to_string())],
+        )
+        .await
+        .unwrap();
+
+        let speakers: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT id, speaker FROM transcripts WHERE meeting_id = 'meeting-1' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            speakers,
+            vec![
+                (
+                    "matched-segment".to_string(),
+                    Some("speaker_02".to_string())
+                ),
+                ("mic-segment".to_string(), Some("mic".to_string())),
+                ("unmatched-segment".to_string(), None),
+            ]
+        );
+
+        let saved_names: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM meeting_speakers WHERE meeting_id = 'meeting-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved_names.0, 0);
     }
 }

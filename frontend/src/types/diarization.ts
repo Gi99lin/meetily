@@ -12,6 +12,20 @@ export interface SpeakerDiarizationResult {
   segments_updated: number;
 }
 
+export type DiarizationStage =
+  | 'queued'
+  | 'decoding'
+  | 'processing'
+  | 'saving'
+  | 'complete'
+  | 'failed';
+
+export interface DiarizationStatusEvent {
+  meeting_id: string;
+  stage: DiarizationStage;
+  error?: string;
+}
+
 export interface MeetingSpeaker {
   meeting_id: string;
   speaker_key: string;

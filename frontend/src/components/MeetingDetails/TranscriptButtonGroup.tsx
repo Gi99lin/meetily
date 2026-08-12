@@ -10,6 +10,11 @@ import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 import { diarizationService } from '@/services/diarizationService';
 import { areDiarizationModelsReady } from '@/types/diarization';
+import type { DiarizationStatusEvent } from '@/types/diarization';
+import { listen } from '@tauri-apps/api/event';
+import { Progress } from '@/components/ui/progress';
+import { diarizationProgressForStage } from '@/lib/diarization-progress';
+import type { DiarizationProgressState } from '@/lib/diarization-progress';
 
 
 interface TranscriptButtonGroupProps {
@@ -36,6 +41,7 @@ export function TranscriptButtonGroup({
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [hasResults, setHasResults] = useState(false);
+  const [diarizationProgress, setDiarizationProgress] = useState<DiarizationProgressState | null>(null);
 
   // Text labels are hidden below a pixel threshold measured on this row's
   // own container, not Tailwind's viewport breakpoints — the transcript
@@ -75,6 +81,33 @@ export function TranscriptButtonGroup({
     };
   }, [meetingId]);
 
+  useEffect(() => {
+    if (!meetingId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<DiarizationStatusEvent>('diarization-status', async ({ payload }) => {
+      if (cancelled || payload.meeting_id !== meetingId) return;
+
+      const terminal = payload.stage === 'complete' || payload.stage === 'failed';
+      setIsDiarizing(!terminal);
+      setDiarizationProgress(diarizationProgressForStage(payload.stage));
+      if (payload.stage === 'complete') {
+        setHasResults(true);
+        await onRefetchTranscripts?.();
+        await onRefetchSpeakerNames?.();
+      }
+    }).then((stopListening) => {
+      if (cancelled) stopListening();
+      else unlisten = stopListening;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [meetingId, onRefetchTranscripts, onRefetchSpeakerNames]);
+
   // isDiarizing is local state, so it resets on unmount even though the
   // backend task keeps running (e.g. navigating to Settings and back).
   // On mount, check whether this meeting actually has a run in progress;
@@ -88,7 +121,14 @@ export function TranscriptButtonGroup({
 
     const checkStatus = async (): Promise<boolean> => {
       const running = await diarizationService.isDiarizationRunning(meetingId);
-      if (!cancelled) setIsDiarizing(running);
+      if (!cancelled) {
+        setIsDiarizing(running);
+        setDiarizationProgress((current) =>
+          running
+            ? current ?? diarizationProgressForStage('processing')
+            : null
+        );
+      }
       return running;
     };
 
@@ -103,9 +143,12 @@ export function TranscriptButtonGroup({
               clearInterval(intervalId);
               intervalId = null;
               if (!cancelled) {
-                setHasResults(true);
-                await onRefetchTranscripts?.();
-                await onRefetchSpeakerNames?.();
+                const completedWithResults = await diarizationService.hasResults(meetingId);
+                setHasResults(completedWithResults);
+                if (completedWithResults) {
+                  await onRefetchTranscripts?.();
+                  await onRefetchSpeakerNames?.();
+                }
               }
             }
           } catch {
@@ -143,6 +186,7 @@ export function TranscriptButtonGroup({
     }
 
     setIsDiarizing(true);
+    setDiarizationProgress(diarizationProgressForStage('queued'));
     try {
       const status = await diarizationService.getModelsStatus();
       if (!areDiarizationModelsReady(status)) {
@@ -164,12 +208,14 @@ export function TranscriptButtonGroup({
       });
     } finally {
       setIsDiarizing(false);
+      setDiarizationProgress(null);
     }
   }, [meetingId, isDiarizing, hasResults, onRefetchTranscripts, onRefetchSpeakerNames]);
 
   return (
-    <div ref={containerRef} className="flex items-center justify-center w-full gap-2">
-      <ButtonGroup>
+    <div ref={containerRef} className="flex flex-col items-center justify-center w-full gap-2">
+      <div className="flex items-center justify-center w-full gap-2">
+        <ButtonGroup>
         <Button
           variant="outline"
           size="sm"
@@ -234,16 +280,33 @@ export function TranscriptButtonGroup({
             )}
           </Button>
         )}
-      </ButtonGroup>
+        </ButtonGroup>
 
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-        <RetranscribeDialog
-          open={showRetranscribeDialog}
-          onOpenChange={setShowRetranscribeDialog}
-          meetingId={meetingId}
-          meetingFolderPath={meetingFolderPath}
-          onComplete={handleRetranscribeComplete}
-        />
+        {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+          <RetranscribeDialog
+            open={showRetranscribeDialog}
+            onOpenChange={setShowRetranscribeDialog}
+            meetingId={meetingId}
+            meetingFolderPath={meetingFolderPath}
+            onComplete={handleRetranscribeComplete}
+          />
+        )}
+      </div>
+
+      {isDiarizing && diarizationProgress && (
+        <div className="w-full max-w-sm px-1" aria-live="polite">
+          <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+            <span>{diarizationProgress.label}</span>
+            <span>{diarizationProgress.value === null ? 'In progress' : `${diarizationProgress.value}%`}</span>
+          </div>
+          {diarizationProgress.value === null ? (
+            <div className="h-2 w-full overflow-hidden rounded-full bg-primary/20">
+              <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
+            </div>
+          ) : (
+            <Progress value={diarizationProgress.value} />
+          )}
+        </div>
       )}
     </div>
   );

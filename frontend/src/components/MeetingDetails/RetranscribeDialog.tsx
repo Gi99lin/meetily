@@ -23,6 +23,8 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
+import { diarizationService } from '@/services/diarizationService';
+import { enqueueAutomaticDiarization } from '@/lib/automatic-diarization';
 
 interface RetranscribeDialogProps {
   open: boolean;
@@ -58,7 +60,7 @@ export function RetranscribeDialog({
   meetingFolderPath,
   onComplete,
 }: RetranscribeDialogProps) {
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig, betaFeatures } = useConfig();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -156,6 +158,13 @@ export function RetranscribeDialog({
             toast.success(
               `Retranscription complete! ${event.payload.segments_count} segments created.`
             );
+            void enqueueAutomaticDiarization(
+              betaFeatures.speakerDiarization,
+              meetingId,
+              diarizationService.enqueueDiarization,
+            ).catch((error) => {
+              console.warn('Automatic speaker diarization could not be queued after retranscription:', error);
+            });
             onCompleteRef.current?.();
             onOpenChangeRef.current(false);
           }
@@ -194,7 +203,7 @@ export function RetranscribeDialog({
       cleanedUpRef.current = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [open, meetingId]);
+  }, [open, meetingId, betaFeatures.speakerDiarization]);
 
   const handleStartRetranscription = async () => {
     if (!meetingFolderPath) {

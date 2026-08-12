@@ -8,6 +8,8 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { storageService } from '@/services/storageService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
+import { useConfig } from '@/contexts/ConfigContext';
+import { diarizationService } from '@/services/diarizationService';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -68,6 +70,7 @@ export function useRecordingStop(
   } = useSidebar();
 
   const router = useRouter();
+  const { betaFeatures } = useConfig();
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
   const stopInProgressRef = useRef(false);
@@ -265,6 +268,12 @@ export function useRecordingStop(
             throw new Error('No meeting ID received from save operation');
           }
 
+          if (betaFeatures.speakerDiarization) {
+            void diarizationService.enqueueDiarization(meetingId).catch((error) => {
+              console.warn('Automatic speaker diarization could not be queued:', error);
+            });
+          }
+
           let shouldDetectSummaryLanguage = false;
           try {
             shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
@@ -435,6 +444,7 @@ export function useRecordingStop(
     meetings,
     setIsMeetingActive,
     router,
+    betaFeatures.speakerDiarization,
   ]);
 
   // Expose handleRecordingStop function to window for Rust callbacks

@@ -587,6 +587,7 @@ pub fn run() {
             diarization::commands::get_diarization_models_status,
             diarization::commands::download_diarization_models,
             diarization::commands::run_speaker_diarization,
+            diarization::commands::enqueue_speaker_diarization,
             diarization::commands::is_diarization_running,
             diarization::commands::has_diarization_results,
             diarization::commands::get_meeting_speaker_names,

@@ -18,7 +18,7 @@ existing `sherpa-onnx` implementation.
 - Segmentation and speaker-embedding sessions each receive
   `max(1, available_parallelism / 2)` threads. They execute sequentially, so
   they share rather than double the CPU budget.
-- The backend emits stage events (`queued`, `decoding`, `segmenting`, `saving`,
+- The backend emits stage events (`queued`, `decoding`, `processing`, `saving`,
   `complete`, `failed`). No fabricated percentage is shown for model inference.
 - Completion causes an open meeting view to refetch transcripts and speaker
   names. Failure leaves the saved transcript untouched and permits a manual

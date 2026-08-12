@@ -38,6 +38,8 @@ import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { getAudioFormatsDisplayList } from '@/constants/audioFormats';
+import { diarizationService } from '@/services/diarizationService';
+import { enqueueAutomaticDiarization } from '@/lib/automatic-diarization';
 
 
 interface ImportAudioDialogProps {
@@ -73,7 +75,7 @@ export function ImportAudioDialog({
 }: ImportAudioDialogProps) {
   const router = useRouter();
   const { refetchMeetings } = useSidebar();
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig, betaFeatures } = useConfig();
 
   const [title, setTitle] = useState('');
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
@@ -98,12 +100,20 @@ export function ImportAudioDialog({
   const handleImportComplete = useCallback((result: ImportResult) => {
     toast.success(`Import complete! ${result.segments_count} segments created.`);
 
+    void enqueueAutomaticDiarization(
+      betaFeatures.speakerDiarization,
+      result.meeting_id,
+      diarizationService.enqueueDiarization,
+    ).catch((error) => {
+      console.warn('Automatic speaker diarization could not be queued after import:', error);
+    });
+
     // Refresh meetings list then navigate to the imported meeting
     refetchMeetings();
     onComplete?.();
     onOpenChange(false);
     router.push(`/meeting-details?id=${result.meeting_id}`);
-  }, [router, refetchMeetings, onComplete, onOpenChange]);
+  }, [router, refetchMeetings, onComplete, onOpenChange, betaFeatures.speakerDiarization]);
 
   const handleImportError = useCallback((error: string) => {
     toast.error('Import failed', { description: error });

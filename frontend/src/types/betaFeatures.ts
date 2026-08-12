@@ -25,7 +25,7 @@ export interface BetaFeatures {
   /**
    * ML-based offline speaker diarization ("Speaker 1", "Speaker 2", ...) for
    * a meeting's recording. Requires the app to be built with the Cargo
-   * `diarization` feature — off by default, so this UI is off by default too.
+   * `diarization` feature.
    * @since v0.4.0
    */
   speakerDiarization: boolean;
@@ -33,7 +33,7 @@ export interface BetaFeatures {
 
 export const DEFAULT_BETA_FEATURES: BetaFeatures = {
   importAndRetranscribe: true, // Default: enabled
-  speakerDiarization: false, // Default: disabled — matching the Cargo feature's off-by-default build
+  speakerDiarization: true, // Default: enabled; an explicit saved user preference still wins
 };
 
 

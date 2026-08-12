@@ -14,7 +14,20 @@ use sherpa_onnx::{
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractorConfig,
 };
+use std::collections::BTreeMap;
 use std::path::Path;
+
+fn inference_threads_for(logical_cores: usize) -> i32 {
+    let threads = (logical_cores.max(1) / 2).max(1);
+    threads.min(i32::MAX as usize) as i32
+}
+
+fn inference_threads() -> i32 {
+    let logical_cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2);
+    inference_threads_for(logical_cores)
+}
 
 /// One speaker-attributed time range from sherpa-onnx's diarization result.
 #[derive(Debug, Clone, Copy)]
@@ -32,15 +45,18 @@ pub struct DiarizationEngine {
 
 impl DiarizationEngine {
     pub fn new(segmentation_model: &Path, embedding_model: &Path) -> Result<Self> {
+        let num_threads = inference_threads();
         let config = OfflineSpeakerDiarizationConfig {
             segmentation: OfflineSpeakerSegmentationModelConfig {
                 pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
                     model: Some(segmentation_model.to_string_lossy().to_string()),
                 },
+                num_threads,
                 ..Default::default()
             },
             embedding: SpeakerEmbeddingExtractorConfig {
                 model: Some(embedding_model.to_string_lossy().to_string()),
+                num_threads,
                 ..Default::default()
             },
             // -1 = auto-detect speaker count via `threshold` (default 0.5),
@@ -59,6 +75,11 @@ impl DiarizationEngine {
                 embedding_model.display()
             )
         })?;
+
+        log::info!(
+            "Speaker diarization using {} inference thread(s)",
+            num_threads
+        );
 
         Ok(Self { inner })
     }
@@ -107,15 +128,20 @@ pub fn dominant_speaker_key_for_range(
     start_seconds: f64,
     end_seconds: f64,
 ) -> Option<String> {
-    diarized
-        .iter()
-        .map(|seg| {
-            let overlap = seg.end_seconds.min(end_seconds) - seg.start_seconds.max(start_seconds);
-            (overlap, seg.speaker_index)
-        })
-        .filter(|(overlap, _)| *overlap > 0.0)
-        .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(_, speaker_index)| speaker_key(speaker_index))
+    let mut overlap_by_speaker = BTreeMap::<i32, f64>::new();
+
+    for segment in diarized {
+        let overlap =
+            segment.end_seconds.min(end_seconds) - segment.start_seconds.max(start_seconds);
+        if overlap > 0.0 {
+            *overlap_by_speaker.entry(segment.speaker_index).or_default() += overlap;
+        }
+    }
+
+    overlap_by_speaker
+        .into_iter()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(speaker_index, _)| speaker_key(speaker_index))
 }
 
 #[cfg(test)]
@@ -129,8 +155,20 @@ mod tests {
         assert_eq!(speaker_key(12), "speaker_12");
     }
 
+    #[test]
+    fn inference_threads_use_half_the_logical_cores() {
+        assert_eq!(inference_threads_for(1), 1);
+        assert_eq!(inference_threads_for(2), 1);
+        assert_eq!(inference_threads_for(8), 4);
+        assert_eq!(inference_threads_for(10), 5);
+    }
+
     fn segment(start: f64, end: f64, speaker: i32) -> DiarizedSegment {
-        DiarizedSegment { start_seconds: start, end_seconds: end, speaker_index: speaker }
+        DiarizedSegment {
+            start_seconds: start,
+            end_seconds: end,
+            speaker_index: speaker,
+        }
     }
 
     #[test]
@@ -140,6 +178,19 @@ mod tests {
         assert_eq!(
             dominant_speaker_key_for_range(&diarized, 4.0, 8.0),
             Some("speaker_01".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dominant_speaker_key_aggregates_overlap_per_speaker() {
+        let diarized = vec![
+            segment(0.0, 2.0, 0),
+            segment(2.0, 5.0, 1),
+            segment(5.0, 7.0, 0),
+        ];
+        assert_eq!(
+            dominant_speaker_key_for_range(&diarized, 0.0, 7.0),
+            Some("speaker_00".to_string())
         );
     }
 
@@ -160,6 +211,8 @@ mod tests {
         // iteration order on ties, which is fine as long as it's deterministic.
         let diarized = vec![segment(0.0, 2.0, 0), segment(2.0, 4.0, 1)];
         let result = dominant_speaker_key_for_range(&diarized, 1.0, 3.0);
-        assert!(result == Some("speaker_00".to_string()) || result == Some("speaker_01".to_string()));
+        assert!(
+            result == Some("speaker_00".to_string()) || result == Some("speaker_01".to_string())
+        );
     }
 }

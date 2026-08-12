@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// Segmentation model: distributed as a .tar.bz2 containing `model.onnx`
 /// under a `sherpa-onnx-pyannote-segmentation-3-0/` directory.
 pub const SEGMENTATION_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
+#[cfg(feature = "diarization")]
 const SEGMENTATION_ARCHIVE_SIZE_BYTES: u64 = 6_958_444;
 const SEGMENTATION_INNER_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 
@@ -18,7 +19,7 @@ const SEGMENTATION_INNER_DIR: &str = "sherpa-onnx-pyannote-segmentation-3-0";
 /// for better separation on English speech, at some cost for other languages —
 /// voice-timbre embeddings still transfer cross-lingually, just less precisely.)
 pub const EMBEDDING_MODEL_URL: &str = "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/wespeaker_en_voxceleb_resnet34.onnx";
-const EMBEDDING_MODEL_SIZE_BYTES: u64 = 27_800_000; // ~26.5 MB
+const EMBEDDING_MODEL_SIZE_BYTES: u64 = 26_534_365;
 
 /// Subdirectory (within the app's shared models directory) holding both files.
 const DIARIZATION_SUBDIR: &str = "diarization";
@@ -60,13 +61,15 @@ pub fn check_models_status(models_dir: &Path) -> DiarizationModelsStatus {
 
     let file_is_plausible = |path: &Path, min_bytes: u64| {
         std::fs::metadata(path)
-            .map(|m| m.len() >= min_bytes / 2) // allow generous slack, real corruption check is on full download
+            .map(|m| m.len() >= min_bytes)
             .unwrap_or(false)
     };
 
     DiarizationModelsStatus {
         segmentation_ready: file_is_plausible(&seg_path, 1_000_000), // model.onnx alone, not the whole archive
-        embedding_ready: file_is_plausible(&emb_path, EMBEDDING_MODEL_SIZE_BYTES),
+        embedding_ready: std::fs::metadata(&emb_path)
+            .map(|metadata| metadata.len() == EMBEDDING_MODEL_SIZE_BYTES)
+            .unwrap_or(false),
     }
 }
 
@@ -97,6 +100,7 @@ mod download {
             download_file(
                 EMBEDDING_MODEL_URL,
                 &embedding_model_path(models_dir),
+                EMBEDDING_MODEL_SIZE_BYTES,
                 progress.map(|cb| ("embedding", cb)),
             )
             .await?;
@@ -110,20 +114,14 @@ mod download {
             download_file(
                 SEGMENTATION_ARCHIVE_URL,
                 &archive_path,
+                SEGMENTATION_ARCHIVE_SIZE_BYTES,
                 progress.map(|cb| ("segmentation", cb)),
             )
             .await?;
 
-            extract_tar_bz2(&archive_path, &diarization_dir(models_dir))?;
-
+            let install_result = install_segmentation_archive(&archive_path, models_dir);
             let _ = std::fs::remove_file(&archive_path);
-
-            if !segmentation_model_path(models_dir).exists() {
-                return Err(anyhow!(
-                    "Segmentation archive extracted but model.onnx not found at expected path \
-                     (upstream archive layout may have changed)"
-                ));
-            }
+            install_result?;
         }
 
         Ok(())
@@ -132,10 +130,56 @@ mod download {
     async fn download_file(
         url: &str,
         dest: &Path,
+        expected_size: u64,
         progress: Option<(&str, &ProgressCallback)>,
     ) -> Result<()> {
-        log::info!("Downloading diarization asset: {} -> {}", url, dest.display());
+        log::info!(
+            "Downloading diarization asset: {} -> {}",
+            url,
+            dest.display()
+        );
 
+        let file_name = dest
+            .file_name()
+            .ok_or_else(|| anyhow!("Download destination has no file name: {}", dest.display()))?
+            .to_string_lossy();
+        let part_path =
+            dest.with_file_name(format!(".{}.{}.part", file_name, uuid::Uuid::new_v4()));
+
+        let result = download_file_to_path(url, &part_path, expected_size, progress).await;
+        if let Err(error) = result {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(error);
+        }
+
+        if tokio::fs::try_exists(dest).await.unwrap_or(false) {
+            tokio::fs::remove_file(dest).await.map_err(|e| {
+                anyhow!(
+                    "Failed to replace invalid model file {}: {}",
+                    dest.display(),
+                    e
+                )
+            })?;
+        }
+
+        if let Err(error) = tokio::fs::rename(&part_path, dest).await {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(anyhow!(
+                "Failed to finalize downloaded model {}: {}",
+                dest.display(),
+                error
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn download_file_to_path(
+        url: &str,
+        dest: &Path,
+        expected_size: u64,
+        progress: Option<(&str, &ProgressCallback)>,
+    ) -> Result<()> {
         let client = reqwest::Client::new();
         let response = client
             .get(url)
@@ -152,6 +196,14 @@ mod download {
         }
 
         let total_size = response.content_length().unwrap_or(0);
+        if total_size > 0 && total_size != expected_size {
+            return Err(anyhow!(
+                "Unexpected download size for {}: server reports {} bytes, expected {}",
+                url,
+                total_size,
+                expected_size
+            ));
+        }
         let mut file = tokio::fs::File::create(dest)
             .await
             .map_err(|e| anyhow!("Failed to create file {}: {}", dest.display(), e))?;
@@ -178,6 +230,19 @@ mod download {
             }
         }
 
+        file.sync_all()
+            .await
+            .map_err(|e| anyhow!("Failed to flush {}: {}", dest.display(), e))?;
+
+        if downloaded != expected_size {
+            return Err(anyhow!(
+                "Incomplete download for {}: received {} bytes, expected {}",
+                url,
+                downloaded,
+                expected_size
+            ));
+        }
+
         log::info!("Downloaded {} bytes to {}", downloaded, dest.display());
         Ok(())
     }
@@ -197,7 +262,89 @@ mod download {
             .map_err(|e| anyhow!("Failed to extract archive: {}", e))?;
         Ok(())
     }
+
+    fn install_segmentation_archive(archive_path: &Path, models_dir: &Path) -> Result<()> {
+        let staging_dir = diarization_dir(models_dir)
+            .join(format!(".segmentation-extract-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staging_dir).map_err(|e| {
+            anyhow!(
+                "Failed to create segmentation staging directory {}: {}",
+                staging_dir.display(),
+                e
+            )
+        })?;
+
+        let result = (|| -> Result<()> {
+            extract_tar_bz2(archive_path, &staging_dir)?;
+
+            let staged_model = staging_dir.join(SEGMENTATION_INNER_DIR).join("model.onnx");
+            if !std::fs::metadata(&staged_model)
+                .map(|metadata| metadata.len() >= 1_000_000)
+                .unwrap_or(false)
+            {
+                return Err(anyhow!(
+                    "Segmentation archive did not contain a complete model at {}",
+                    staged_model.display()
+                ));
+            }
+
+            let final_model = segmentation_model_path(models_dir);
+            let final_parent = final_model.parent().ok_or_else(|| {
+                anyhow!(
+                    "Segmentation model path has no parent: {}",
+                    final_model.display()
+                )
+            })?;
+            std::fs::create_dir_all(final_parent).map_err(|e| {
+                anyhow!(
+                    "Failed to create segmentation model directory {}: {}",
+                    final_parent.display(),
+                    e
+                )
+            })?;
+            if final_model.exists() {
+                std::fs::remove_file(&final_model)
+                    .map_err(|e| anyhow!("Failed to replace {}: {}", final_model.display(), e))?;
+            }
+            std::fs::rename(&staged_model, &final_model).map_err(|e| {
+                anyhow!(
+                    "Failed to finalize segmentation model {}: {}",
+                    final_model.display(),
+                    e
+                )
+            })?;
+            Ok(())
+        })();
+
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        result
+    }
 }
 
 #[cfg(feature = "diarization")]
 pub use download::{ensure_models_downloaded, ProgressCallback};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_model_requires_complete_expected_size() {
+        let root = std::env::temp_dir().join(format!(
+            "meetily-diarization-model-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let model_path = embedding_model_path(&root);
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+
+        let file = std::fs::File::create(&model_path).unwrap();
+        file.set_len(EMBEDDING_MODEL_SIZE_BYTES - 1).unwrap();
+        assert!(!check_models_status(&root).embedding_ready);
+
+        file.set_len(EMBEDDING_MODEL_SIZE_BYTES).unwrap();
+        assert!(check_models_status(&root).embedding_ready);
+
+        drop(file);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
